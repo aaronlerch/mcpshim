@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -87,12 +88,16 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	cfg := r.cfg
 	r.mu.RUnlock()
 
+	log.Printf("[registry] refresh starting for %d server(s)", len(cfg.Servers))
 	cache := map[string][]protocol.ToolInfo{}
 	for _, s := range cfg.Servers {
+		log.Printf("[registry] refreshing server %q (transport=%s, has_auth_header=%v)", s.Name, s.Transport, hasAuthorizationHeader(s.Headers))
 		tools, err := fetchToolsForServer(ctx, s, r.store, false)
 		if err != nil {
+			log.Printf("[registry] refresh failed for %q: %v", s.Name, err)
 			continue
 		}
+		log.Printf("[registry] refresh succeeded for %q: %d tools", s.Name, len(tools))
 		cache[s.Name] = tools
 	}
 
@@ -100,6 +105,7 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	r.toolCache = cache
 	r.cacheStamp = time.Now().UTC()
 	r.mu.Unlock()
+	log.Printf("[registry] refresh complete, %d server(s) cached", len(cache))
 	return nil
 }
 
@@ -154,6 +160,7 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 		args = map[string]interface{}{}
 	}
 
+	log.Printf("[registry] Call server=%q tool=%q", server, tool)
 	res, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) (interface{}, error) {
 		req := mcpproto.CallToolRequest{}
 		req.Params.Name = tool
@@ -166,8 +173,10 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 		return result, nil
 	})
 	if err != nil {
+		log.Printf("[registry] Call server=%q tool=%q failed: %v", server, tool, err)
 		return nil, err
 	}
+	log.Printf("[registry] Call server=%q tool=%q succeeded", server, tool)
 	return res, nil
 }
 

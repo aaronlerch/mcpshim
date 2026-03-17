@@ -10,7 +10,7 @@ all: build
 build:
 	@for cmd in $(CMDS); do \
 		echo "Building $$cmd ($(VERSION))..."; \
-		CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $$cmd ./cmd/$$cmd; \
+		CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)" -o $$cmd ./cmd/$$cmd; \
 	done
 
 fmt:

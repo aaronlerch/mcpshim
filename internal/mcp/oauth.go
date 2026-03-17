@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,43 +26,73 @@ import (
 const oauthCallbackTimeout = 5 * time.Minute
 
 func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStore *store.Store, interactive bool, operation func(compatibleClient) (T, error)) (T, error) {
-	result, err := runOperation(ctx, s, operation)
-	if err == nil || !shouldTryOAuthFallback(s, err) {
-		return result, err
+	// Skip the unauthenticated probe if this server has prior OAuth state — it will always 401.
+	if hasAuthorizationHeader(s.Headers) || (dbStore != nil && !dbStore.HasOAuthState(s.Name)) {
+		log.Printf("[oauth:%s] attempting direct (non-OAuth) operation", s.Name)
+		result, err := runOperation(ctx, s, operation)
+		if err == nil {
+			log.Printf("[oauth:%s] direct operation succeeded, no OAuth needed", s.Name)
+			return result, err
+		}
+		log.Printf("[oauth:%s] direct operation failed: %v", s.Name, err)
+		if !shouldTryOAuthFallback(s, err) {
+			log.Printf("[oauth:%s] not eligible for OAuth fallback (has_auth_header=%v, is_unauthorized=%v)",
+				s.Name, hasAuthorizationHeader(s.Headers), errors.Is(err, transport.ErrUnauthorized))
+			return result, err
+		}
+	} else {
+		log.Printf("[oauth:%s] skipping unauthenticated probe (server has stored OAuth state)", s.Name)
 	}
 
-	callback := (*oauthCallbackServer)(nil)
+	log.Printf("[oauth:%s] falling back to OAuth client (interactive=%v)", s.Name, interactive)
+
+	var callback *oauthCallbackServer
 	redirectURI := "http://127.0.0.1:53685/oauth/callback"
 	if interactive {
-		callback, err = startOAuthCallbackServer()
-		if err != nil {
+		var cbErr error
+		callback, cbErr = startOAuthCallbackServer()
+		if cbErr != nil {
 			var zero T
-			return zero, err
+			return zero, cbErr
 		}
 		defer callback.close()
 		redirectURI = callback.redirectURI
 	}
 
-	oauthClient, closeFn, err := newOAuthClient(s, mcpclient.OAuthConfig{
+	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
 		TokenStore:  newSQLiteTokenStore(dbStore, s.Name),
 		PKCEEnabled: true,
-	})
+	}
+	// Load persisted client credentials so token refresh can include client_id.
+	if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
+		log.Printf("[oauth:%s] loaded stored client credentials (client_id=%s…)", s.Name, tokenPrefix(storedClient.ClientID))
+		oauthCfg.ClientID = storedClient.ClientID
+		oauthCfg.ClientSecret = storedClient.ClientSecret
+	}
+
+	oauthClient, closeFn, err := newOAuthClient(s, oauthCfg)
 	if err != nil {
+		log.Printf("[oauth:%s] failed to create OAuth client: %v", s.Name, err)
 		var zero T
 		return zero, err
 	}
 	defer closeFn()
 
-	result, err = runOperationWithClient(ctx, oauthClient, operation)
+	log.Printf("[oauth:%s] retrying operation with OAuth client (stored token will be tried first by mcp-go)", s.Name)
+	result, err := runOperationWithClient(ctx, oauthClient, operation)
 	if err == nil {
+		log.Printf("[oauth:%s] OAuth client operation succeeded (token was valid or refreshed)", s.Name)
 		return result, nil
 	}
+	log.Printf("[oauth:%s] OAuth client operation failed: %v (is_auth_required=%v)",
+		s.Name, err, mcpclient.IsOAuthAuthorizationRequiredError(err))
 
 	if !mcpclient.IsOAuthAuthorizationRequiredError(err) {
 		return result, err
 	}
 	if !interactive {
+		log.Printf("[oauth:%s] full re-authorization needed but not interactive — cannot complete login", s.Name)
 		var zero T
 		return zero, fmt.Errorf("server %q requires oauth authorization; run a direct command like mcpshim tools --server %s to complete login", s.Name, s.Name)
 	}
@@ -70,11 +101,22 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		return zero, errors.New("oauth callback server is not available")
 	}
 
-	if err := completeOAuthFlow(ctx, err, callback, false); err != nil {
+	log.Printf("[oauth:%s] initiating full OAuth authorization flow (browser login)", s.Name)
+	// Extract handler before completeOAuthFlow shadows err.
+	oauthHandler := mcpclient.GetOAuthHandler(err)
+	if flowErr := completeOAuthFlow(ctx, err, callback, false); flowErr != nil {
+		log.Printf("[oauth:%s] OAuth flow failed: %v", s.Name, flowErr)
 		var zero T
-		return zero, err
+		return zero, flowErr
 	}
 
+	// Persist client credentials obtained during registration for future sessions.
+	if oauthHandler != nil && oauthHandler.GetClientID() != "" {
+		log.Printf("[oauth:%s] persisting client credentials after OAuth flow", s.Name)
+		_ = dbStore.SaveOAuthClient(s.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret())
+	}
+
+	log.Printf("[oauth:%s] OAuth flow completed, retrying operation with new token", s.Name)
 	return runOperationWithClient(ctx, oauthClient, operation)
 }
 
@@ -91,11 +133,17 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		redirectURI = callback.redirectURI
 	}
 
-	oauthClient, closeFn, err := newOAuthClient(s, mcpclient.OAuthConfig{
+	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
 		TokenStore:  newSQLiteTokenStore(dbStore, s.Name),
 		PKCEEnabled: true,
-	})
+	}
+	if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
+		oauthCfg.ClientID = storedClient.ClientID
+		oauthCfg.ClientSecret = storedClient.ClientSecret
+	}
+
+	oauthClient, closeFn, err := newOAuthClient(s, oauthCfg)
 	if err != nil {
 		return err
 	}
@@ -111,7 +159,16 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		return err
 	}
 
-	return completeOAuthFlow(ctx, err, callback, manual)
+	oauthHandler := mcpclient.GetOAuthHandler(err)
+	if flowErr := completeOAuthFlow(ctx, err, callback, manual); flowErr != nil {
+		return flowErr
+	}
+
+	// Persist client credentials for future sessions.
+	if oauthHandler != nil && oauthHandler.GetClientID() != "" {
+		_ = dbStore.SaveOAuthClient(s.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret())
+	}
+	return nil
 }
 
 func runOperation[T any](ctx context.Context, s config.MCPServer, operation func(compatibleClient) (T, error)) (T, error) {
@@ -127,6 +184,7 @@ func runOperation[T any](ctx context.Context, s config.MCPServer, operation func
 
 func runOperationWithClient[T any](ctx context.Context, client compatibleClient, operation func(compatibleClient) (T, error)) (T, error) {
 	if err := client.Start(ctx); err != nil {
+		log.Printf("[mcp] client.Start failed: %v", err)
 		var zero T
 		return zero, err
 	}
@@ -134,6 +192,7 @@ func runOperationWithClient[T any](ctx context.Context, client compatibleClient,
 	initReq.Params.ProtocolVersion = mcpproto.LATEST_PROTOCOL_VERSION
 	initReq.Params.ClientInfo = mcpproto.Implementation{Name: "mcpshimd", Version: "dev"}
 	if _, err := client.Initialize(ctx, initReq); err != nil {
+		log.Printf("[mcp] client.Initialize failed: %v", err)
 		var zero T
 		return zero, err
 	}

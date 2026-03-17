@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 	token_json TEXT NOT NULL,
 	updated_at_utc TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+	server TEXT PRIMARY KEY,
+	client_id TEXT NOT NULL,
+	client_secret TEXT NOT NULL DEFAULT '',
+	updated_at_utc TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return fmt.Errorf("init sqlite schema: %w", err)
@@ -217,6 +224,43 @@ ON CONFLICT(server) DO UPDATE SET token_json=excluded.token_json, updated_at_utc
 		return fmt.Errorf("save token: %w", err)
 	}
 	return nil
+}
+
+// OAuthClient holds persisted OAuth client credentials for a server.
+type OAuthClient struct {
+	ClientID     string
+	ClientSecret string
+}
+
+func (s *Store) GetOAuthClient(server string) (*OAuthClient, error) {
+	var clientID, clientSecret string
+	err := s.db.QueryRow(`SELECT client_id, client_secret FROM oauth_clients WHERE server = ?`, server).Scan(&clientID, &clientSecret)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get oauth client: %w", err)
+	}
+	return &OAuthClient{ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
+func (s *Store) SaveOAuthClient(server string, clientID, clientSecret string) error {
+	_, err := s.db.Exec(`
+INSERT INTO oauth_clients (server, client_id, client_secret, updated_at_utc)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(server) DO UPDATE SET client_id=excluded.client_id, client_secret=excluded.client_secret, updated_at_utc=excluded.updated_at_utc
+`, server, clientID, clientSecret, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("save oauth client: %w", err)
+	}
+	return nil
+}
+
+// HasOAuthState returns true if this server has stored OAuth tokens or client credentials.
+func (s *Store) HasOAuthState(server string) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT 1 FROM oauth_tokens WHERE server = ? UNION SELECT 1 FROM oauth_clients WHERE server = ?`, server, server).Scan(&n)
+	return n == 1
 }
 
 func boolToInt(value bool) int {
