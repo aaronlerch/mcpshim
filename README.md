@@ -181,6 +181,19 @@ mcpshim call --server notion --tool search --query "projects" --limit 10 --archi
 
 ---
 
+## Elicitation
+
+When an upstream MCP server invokes `elicitation/create` mid-call (e.g. "are you sure you want to delete this?"), the daemon relays the question to the calling `mcpshim` process, which prompts the user on stderr and sends the answer back over the same socket connection.
+
+Two modes are supported:
+
+- **Form** — the server sends a JSON schema; the user replies with a JSON object on one line, or types `decline`/`cancel`. Invalid JSON automatically declines.
+- **URL** — the server sends a URL; the user is asked `[y/N/cancel]`. Anything that isn't `y`/`yes` declines.
+
+When stdin is not a TTY (programmatic invocation), elicitation is automatically declined so calls don't hang waiting for input.
+
+---
+
 ## Server Status & Resilience
 
 Every registered server carries a status that you can see via `mcpshim servers`:

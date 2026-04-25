@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1008,18 +1009,101 @@ func call(req protocol.Request, socketPath string) (*protocol.Response, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(70 * time.Second))
+	// Long deadline tolerates user input mid-call for elicitation prompts.
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Minute))
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(req); err != nil {
 		return nil, err
 	}
-	var resp protocol.Response
-	if err := dec.Decode(&resp); err != nil {
-		return nil, err
+	for {
+		var resp protocol.Response
+		if err := dec.Decode(&resp); err != nil {
+			return nil, err
+		}
+		if resp.Elicitation == nil {
+			return &resp, nil
+		}
+		answer := promptElicitation(resp.Elicitation)
+		reply := protocol.Request{Action: "elicitation_response", ElicitationAnswer: answer}
+		if err := enc.Encode(reply); err != nil {
+			return nil, err
+		}
 	}
-	return &resp, nil
+}
+
+// promptElicitation surfaces an upstream MCP server's elicitation request to
+// the user. In non-interactive contexts (no TTY on stdin) it auto-declines so
+// programmatic invocations don't hang.
+func promptElicitation(req *protocol.ElicitationRequest) *protocol.ElicitationAnswer {
+	if !isStdinTerminal() {
+		fmt.Fprintf(os.Stderr, "[mcpshim] elicitation declined automatically (non-interactive): %s\n", req.Message)
+		return &protocol.ElicitationAnswer{Action: "decline"}
+	}
+
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "[mcpshim] %s asks:\n", req.Server)
+	fmt.Fprintf(os.Stderr, "  %s\n", req.Message)
+
+	mode := req.Mode
+	if mode == "" {
+		mode = "form"
+	}
+
+	switch mode {
+	case "url":
+		if req.URL != "" {
+			fmt.Fprintf(os.Stderr, "  URL: %s\n", req.URL)
+		}
+		fmt.Fprint(os.Stderr, "  Visit URL and confirm? [y/N/cancel]: ")
+		line := readStdinLine()
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			return &protocol.ElicitationAnswer{Action: "accept"}
+		case "c", "cancel":
+			return &protocol.ElicitationAnswer{Action: "cancel"}
+		default:
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		}
+	default: // form
+		if req.RequestedSchema != nil {
+			schemaJSON, _ := json.MarshalIndent(req.RequestedSchema, "  ", "  ")
+			fmt.Fprintf(os.Stderr, "  Expected JSON schema:\n  %s\n", string(schemaJSON))
+		}
+		fmt.Fprint(os.Stderr, "  Reply with JSON object (or 'decline'/'cancel'): ")
+		line := readStdinLine()
+		trimmed := strings.TrimSpace(line)
+		switch strings.ToLower(trimmed) {
+		case "decline", "":
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		case "cancel":
+			return &protocol.ElicitationAnswer{Action: "cancel"}
+		}
+		var content any
+		if err := json.Unmarshal([]byte(trimmed), &content); err != nil {
+			fmt.Fprintf(os.Stderr, "  invalid JSON (%v); declining\n", err)
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		}
+		return &protocol.ElicitationAnswer{Action: "accept", Content: content}
+	}
+}
+
+func readStdinLine() string {
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	return line
+}
+
+func isStdinTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func fallbackSocketPath(requested string) string {

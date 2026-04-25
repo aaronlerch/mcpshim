@@ -652,44 +652,63 @@ type compatibleClient interface {
 	Close() error
 }
 
-func newClient(s config.MCPServer) (compatibleClient, func(), error) {
-	if s.Transport == "stdio" {
-		env := append(os.Environ(), envMapToList(s.Env)...)
-		c, err := mcpclient.NewStdioMCPClient(s.Command, env, s.Args...)
-		if err != nil {
-			return nil, nil, err
-		}
-		return c, func() { _ = c.Close() }, nil
-	}
-
-	headers, err := resolveHeaders(s)
+func newClient(ctx context.Context, s config.MCPServer) (compatibleClient, func(), error) {
+	trans, err := buildTransport(s, nil)
 	if err != nil {
 		return nil, nil, err
 	}
+	cli := mcpclient.NewClient(trans, clientOptionsFor(ctx, s)...)
+	return cli, func() { _ = cli.Close() }, nil
+}
 
-	var cli compatibleClient
-	if s.Transport == "sse" {
+// buildTransport constructs the lower-level mcp-go transport for s. When
+// oauthCfg is non-nil it layers OAuth in (HTTP/SSE only).
+func buildTransport(s config.MCPServer, oauthCfg *mcpclient.OAuthConfig) (transport.Interface, error) {
+	switch s.Transport {
+	case "stdio":
+		if oauthCfg != nil {
+			return nil, fmt.Errorf("oauth is not supported for stdio transport")
+		}
+		env := append(os.Environ(), envMapToList(s.Env)...)
+		return transport.NewStdioWithOptions(s.Command, env, s.Args), nil
+	case "sse":
+		headers, err := resolveHeaders(s)
+		if err != nil {
+			return nil, err
+		}
 		opts := []transport.ClientOption{}
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHeaders(headers))
 		}
-		c, err := mcpclient.NewSSEMCPClient(s.URL, opts...)
-		if err != nil {
-			return nil, nil, err
+		if oauthCfg != nil {
+			opts = append(opts, transport.WithOAuth(*oauthCfg))
 		}
-		cli = c
-	} else {
+		return transport.NewSSE(s.URL, opts...)
+	default: // "http" or unspecified
+		headers, err := resolveHeaders(s)
+		if err != nil {
+			return nil, err
+		}
 		opts := []transport.StreamableHTTPCOption{}
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHTTPHeaders(headers))
 		}
-		c, err := mcpclient.NewStreamableHttpClient(s.URL, opts...)
-		if err != nil {
-			return nil, nil, err
+		if oauthCfg != nil {
+			opts = append(opts, transport.WithHTTPOAuth(*oauthCfg))
 		}
-		cli = c
+		return transport.NewStreamableHTTP(s.URL, opts...)
 	}
-	return cli, func() { _ = cli.Close() }, nil
+}
+
+// clientOptionsFor returns the mcp-go ClientOption slice for s. The
+// elicitation handler is wired to whatever Session is currently bound to
+// ctx (or to no-op decline when running headless).
+func clientOptionsFor(ctx context.Context, s config.MCPServer) []mcpclient.ClientOption {
+	bridge := &elicitBridge{
+		server: s.Name,
+		getCtx: func() context.Context { return ctx },
+	}
+	return []mcpclient.ClientOption{mcpclient.WithElicitationHandler(bridge)}
 }
 
 func envMapToList(m map[string]string) []string {
