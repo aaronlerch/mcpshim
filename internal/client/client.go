@@ -168,7 +168,7 @@ func Run(binaryName string, argv []string) int {
 		return runCall(rest, socketPath, jsonOut)
 	case "add":
 		fs := flag.NewFlagSet("add", flag.ContinueOnError)
-		var name, alias, url, transport, command, headersHelper string
+		var name, alias, url, transport, command, headersHelper, clientID, clientSecret string
 		var headers headerArgs
 		var cmdArgs stringSliceArgs
 		var env headerArgs
@@ -181,6 +181,8 @@ func Run(binaryName string, argv []string) int {
 		fs.StringVar(&command, "command", "", "executable to launch (stdio only)")
 		fs.Var(&cmdArgs, "arg", "command argument (repeatable, stdio only)")
 		fs.Var(&env, "env", "environment variable key=value (repeatable, stdio only)")
+		fs.StringVar(&clientID, "client-id", "", "pre-configured OAuth client_id (skips dynamic registration)")
+		fs.StringVar(&clientSecret, "client-secret", "", "pre-configured OAuth client_secret")
 		_ = fs.Parse(rest)
 		headersMap := map[string]string(headers)
 		envMap := map[string]string(env)
@@ -195,6 +197,8 @@ func Run(binaryName string, argv []string) int {
 			Command:       command,
 			CmdArgs:       []string(cmdArgs),
 			Env:           envMap,
+			ClientID:      clientID,
+			ClientSecret:  clientSecret,
 		}, socketPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -281,6 +285,29 @@ func Run(binaryName string, argv []string) int {
 			return 1
 		}
 		return runLoginLocal(server, manual)
+	case "logout":
+		fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+		var server string
+		var full bool
+		fs.StringVar(&server, "server", "", "server name or alias")
+		fs.BoolVar(&full, "full", false, "also delete persisted client credentials")
+		_ = fs.Parse(rest)
+		if server == "" {
+			pos := fs.Args()
+			if len(pos) > 0 {
+				server = pos[0]
+			}
+		}
+		if server == "" {
+			fmt.Fprintln(os.Stderr, "usage: mcpshim logout --server <name> [--full]")
+			return 1
+		}
+		resp, err := call(protocol.Request{Action: "logout", Server: server, Full: full}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return printResponse(resp, jsonOut)
 	case "resources":
 		fs := flag.NewFlagSet("resources", flag.ContinueOnError)
 		var server string
@@ -434,17 +461,19 @@ func runSetCommand(args []string, socket string, jsonOut bool) int {
 	}
 
 	fs := flag.NewFlagSet("set auth", flag.ContinueOnError)
-	var name string
+	var name, clientID, clientSecret string
 	var headers headerArgs
 	fs.StringVar(&name, "server", "", "server name")
 	fs.Var(&headers, "header", "request header key=value (repeatable)")
+	fs.StringVar(&clientID, "client-id", "", "pre-configured OAuth client_id")
+	fs.StringVar(&clientSecret, "client-secret", "", "pre-configured OAuth client_secret")
 	_ = fs.Parse(args[1:])
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "usage: mcpshim set auth --server <name> --header K=V")
+		fmt.Fprintln(os.Stderr, "usage: mcpshim set auth --server <name> [--header K=V] [--client-id X --client-secret Y]")
 		return 1
 	}
 	headersMap := map[string]string(headers)
-	resp, err := call(protocol.Request{Action: "set_auth", Name: name, Headers: headersMap}, socket)
+	resp, err := call(protocol.Request{Action: "set_auth", Name: name, Headers: headersMap, ClientID: clientID, ClientSecret: clientSecret}, socket)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -1349,12 +1378,14 @@ func usage() {
 	fmt.Println("       use '--' before tool args to pass reserved names (e.g. --help, --server)")
 	fmt.Println("  add --name x --url http://... [--transport http|sse] [--alias short] [--header K=V] [--headers-helper 'cmd']")
 	fmt.Println("  add --name x --transport stdio --command bin [--arg a] [--env K=V]")
-	fmt.Println("  set auth --server x [--header K=V]")
+	fmt.Println("       optional: [--client-id X --client-secret Y] for pre-configured OAuth")
+	fmt.Println("  set auth --server x [--header K=V] [--client-id X --client-secret Y]")
 	fmt.Println("  remove --name x")
 	fmt.Println("  reload")
 	fmt.Println("  refresh [--server name]")
 	fmt.Println("  validate [--config path]")
 	fmt.Println("  login --server name [--manual]")
+	fmt.Println("  logout --server name [--full]")
 	fmt.Println("  status")
 	fmt.Println("  history [--server name] [--tool name] [--limit 50]")
 	fmt.Println("  resources [--server name]")

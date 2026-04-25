@@ -219,6 +219,11 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 		if err := config.Save(s.configPath, s.cfg); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
 		}
+		if req.ClientID != "" && s.store != nil {
+			if err := s.store.SaveOAuthClient(req.Name, req.ClientID, req.ClientSecret); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
+		}
 		s.registry.UpdateConfig(s.cfg)
 		_ = s.registry.Refresh(context.Background())
 		return protocol.Response{OK: true, Text: fmt.Sprintf("added server %s", req.Name)}
@@ -257,6 +262,11 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 		}
 		if err := config.Save(s.configPath, s.cfg); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		if req.ClientID != "" && s.store != nil {
+			if err := s.store.SaveOAuthClient(req.Name, req.ClientID, req.ClientSecret); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
 		}
 		s.registry.UpdateConfig(s.cfg)
 		return protocol.Response{OK: true, Text: "updated authentication"}
@@ -329,6 +339,27 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 			return protocol.Response{OK: false, Error: err.Error()}
 		}
 		return protocol.Response{OK: true, PromptResult: result}
+	case "logout":
+		if req.Server == "" {
+			return protocol.Response{OK: false, Error: "server is required"}
+		}
+		if !serverConfigured(s.cfg, req.Server) {
+			return protocol.Response{OK: false, Error: fmt.Sprintf("unknown server %q", req.Server)}
+		}
+		if s.store == nil {
+			return protocol.Response{OK: false, Error: "store not initialized"}
+		}
+		if err := s.store.DeleteOAuthToken(req.Server); err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		text := fmt.Sprintf("cleared oauth token for %s", req.Server)
+		if req.Full {
+			if err := s.store.DeleteOAuthClient(req.Server); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
+			text = fmt.Sprintf("cleared oauth token and client credentials for %s", req.Server)
+		}
+		return protocol.Response{OK: true, Text: text}
 	case "login":
 		if req.Server == "" {
 			return protocol.Response{OK: false, Error: "server is required"}

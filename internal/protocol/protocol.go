@@ -20,6 +20,9 @@ type Request struct {
 	URI               string                 `json:"uri,omitempty"`
 	PromptArgs        map[string]string      `json:"prompt_args,omitempty"`
 	ElicitationAnswer *ElicitationAnswer     `json:"elicitation_answer,omitempty"`
+	ClientID          string                 `json:"client_id,omitempty"`
+	ClientSecret      string                 `json:"client_secret,omitempty"`
+	Full              bool                   `json:"full,omitempty"`
 }
 
 // ElicitationRequest is sent from the daemon to the CLI mid-call when the
