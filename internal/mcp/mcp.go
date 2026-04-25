@@ -1,10 +1,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +20,8 @@ import (
 	"github.com/mcpshim/mcpshim/internal/protocol"
 	"github.com/mcpshim/mcpshim/internal/store"
 )
+
+const headersHelperTimeout = 10 * time.Second
 
 type Registry struct {
 	mu         sync.RWMutex
@@ -305,12 +311,22 @@ type compatibleClient interface {
 }
 
 func newClient(s config.MCPServer) (compatibleClient, func(), error) {
+	if s.Transport == "stdio" {
+		env := append(os.Environ(), envMapToList(s.Env)...)
+		c, err := mcpclient.NewStdioMCPClient(s.Command, env, s.Args...)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, func() { _ = c.Close() }, nil
+	}
+
+	headers, err := resolveHeaders(s)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	var cli compatibleClient
 	if s.Transport == "sse" {
-		headers := map[string]string{}
-		for k, v := range s.Headers {
-			headers[k] = v
-		}
 		opts := []transport.ClientOption{}
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHeaders(headers))
@@ -322,10 +338,6 @@ func newClient(s config.MCPServer) (compatibleClient, func(), error) {
 		cli = c
 	} else {
 		opts := []transport.StreamableHTTPCOption{}
-		headers := map[string]string{}
-		for k, v := range s.Headers {
-			headers[k] = v
-		}
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHTTPHeaders(headers))
 		}
@@ -336,6 +348,72 @@ func newClient(s config.MCPServer) (compatibleClient, func(), error) {
 		cli = c
 	}
 	return cli, func() { _ = cli.Close() }, nil
+}
+
+func envMapToList(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// resolveHeaders returns the effective request headers for an HTTP/SSE server,
+// combining static `Headers` with output from `HeadersHelper` (helper wins).
+// Runs the helper fresh every call (no caching), with a 10-second timeout
+// and the same env-var contract Claude Code documents.
+func resolveHeaders(s config.MCPServer) (map[string]string, error) {
+	headers := map[string]string{}
+	for k, v := range s.Headers {
+		headers[k] = v
+	}
+	if s.HeadersHelper == "" {
+		return headers, nil
+	}
+	dynamic, err := runHeadersHelper(s)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range dynamic {
+		headers[k] = v
+	}
+	return headers, nil
+}
+
+func runHeadersHelper(s config.MCPServer) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), headersHelperTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", s.HeadersHelper)
+	cmd.Env = append(os.Environ(),
+		"MCPSHIM_SERVER_NAME="+s.Name,
+		"MCPSHIM_SERVER_URL="+s.URL,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("headers_helper for %q timed out after %s", s.Name, headersHelperTimeout)
+		}
+		stderrTrim := bytes.TrimSpace(stderr.Bytes())
+		if len(stderrTrim) > 0 {
+			return nil, fmt.Errorf("headers_helper for %q failed: %w: %s", s.Name, err, string(stderrTrim))
+		}
+		return nil, fmt.Errorf("headers_helper for %q failed: %w", s.Name, err)
+	}
+	out = bytes.TrimSpace(out)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("headers_helper for %q produced empty output", s.Name)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("headers_helper for %q output is not a JSON object of strings: %w", s.Name, err)
+	}
+	return result, nil
 }
 
 func findServer(cfg *config.Config, nameOrAlias string) (config.MCPServer, bool) {

@@ -26,6 +26,12 @@ import (
 const oauthCallbackTimeout = 5 * time.Minute
 
 func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStore *store.Store, interactive bool, operation func(compatibleClient) (T, error)) (T, error) {
+	// stdio has no HTTP layer; OAuth is meaningless. Same goes for HTTP/SSE
+	// servers whose auth comes from a headers_helper script — that script is
+	// the auth source and we should not fall back to OAuth.
+	if s.Transport == "stdio" || s.HeadersHelper != "" {
+		return runOperation(ctx, s, operation)
+	}
 	// Skip the unauthenticated probe if this server has prior OAuth state — it will always 401.
 	if hasAuthorizationHeader(s.Headers) || (dbStore != nil && !dbStore.HasOAuthState(s.Name)) {
 		log.Printf("[oauth:%s] attempting direct (non-OAuth) operation", s.Name)
@@ -121,6 +127,9 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 }
 
 func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store, manual bool) error {
+	if s.Transport == "stdio" {
+		return fmt.Errorf("oauth login is not supported for stdio transport")
+	}
 	callback := (*oauthCallbackServer)(nil)
 	redirectURI := "http://127.0.0.1:53685/oauth/callback"
 	if !manual {
@@ -384,10 +393,17 @@ func (s *oauthCallbackServer) wait(ctx context.Context) (map[string]string, erro
 }
 
 func newOAuthClient(s config.MCPServer, oauthConfig mcpclient.OAuthConfig) (compatibleClient, func(), error) {
+	if s.Transport == "stdio" {
+		return nil, nil, fmt.Errorf("oauth client is not supported for stdio transport")
+	}
+	headers, err := resolveHeaders(s)
+	if err != nil {
+		return nil, nil, err
+	}
 	if s.Transport == "sse" {
 		opts := []transport.ClientOption{}
-		if len(s.Headers) > 0 {
-			opts = append(opts, transport.WithHeaders(s.Headers))
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHeaders(headers))
 		}
 		cli, err := mcpclient.NewOAuthSSEClient(s.URL, oauthConfig, opts...)
 		if err != nil {
@@ -397,8 +413,8 @@ func newOAuthClient(s config.MCPServer, oauthConfig mcpclient.OAuthConfig) (comp
 	}
 
 	opts := []transport.StreamableHTTPCOption{}
-	if len(s.Headers) > 0 {
-		opts = append(opts, transport.WithHTTPHeaders(s.Headers))
+	if len(headers) > 0 {
+		opts = append(opts, transport.WithHTTPHeaders(headers))
 	}
 	cli, err := mcpclient.NewOAuthStreamableHttpClient(s.URL, oauthConfig, opts...)
 	if err != nil {

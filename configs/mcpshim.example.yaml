@@ -15,3 +15,23 @@ servers:
     url: https://mcp.example.com/sse
     headers:
       Authorization: Bearer ${TOKEN}
+      X-Region: ${REGION:-us-east}
+
+  # Dynamic auth: helper command produces JSON {"Authorization":"Bearer ..."} per connect.
+  # Receives MCPSHIM_SERVER_NAME and MCPSHIM_SERVER_URL in env. 10s timeout, no caching.
+  - name: internal
+    transport: http
+    url: https://mcp.internal.example.com
+    headers_helper: /opt/bin/get-mcp-auth-headers.sh
+
+  # Local subprocess MCP server (stdio transport).
+  - name: filesystem
+    alias: fs
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - /Users/me/projects
+    env:
+      LOG_LEVEL: info

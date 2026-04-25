@@ -23,11 +23,15 @@ type ServerConfig struct {
 }
 
 type MCPServer struct {
-	Name      string            `yaml:"name"`
-	Alias     string            `yaml:"alias,omitempty"`
-	URL       string            `yaml:"url"`
-	Transport string            `yaml:"transport,omitempty"`
-	Headers   map[string]string `yaml:"headers,omitempty"`
+	Name          string            `yaml:"name"`
+	Alias         string            `yaml:"alias,omitempty"`
+	URL           string            `yaml:"url,omitempty"`
+	Transport     string            `yaml:"transport,omitempty"`
+	Headers       map[string]string `yaml:"headers,omitempty"`
+	HeadersHelper string            `yaml:"headers_helper,omitempty"`
+	Command       string            `yaml:"command,omitempty"`
+	Args          []string          `yaml:"args,omitempty"`
+	Env           map[string]string `yaml:"env,omitempty"`
 }
 
 func normalizeTransport(value string) (string, error) {
@@ -36,8 +40,10 @@ func normalizeTransport(value string) (string, error) {
 		return "http", nil
 	case "sse":
 		return "sse", nil
+	case "stdio":
+		return "stdio", nil
 	default:
-		return "", fmt.Errorf("unsupported transport %q (expected http or sse)", value)
+		return "", fmt.Errorf("unsupported transport %q (expected http, sse, or stdio)", value)
 	}
 }
 
@@ -95,10 +101,19 @@ func Load(path string) (*Config, error) {
 	}
 	for i := range cfg.Servers {
 		s := &cfg.Servers[i]
-		s.URL = os.ExpandEnv(s.URL)
+		s.URL = expandEnv(s.URL)
 		if s.Headers != nil {
 			for k, v := range s.Headers {
-				s.Headers[k] = os.ExpandEnv(v)
+				s.Headers[k] = expandEnv(v)
+			}
+		}
+		s.Command = expandEnv(s.Command)
+		for ai, a := range s.Args {
+			s.Args[ai] = expandEnv(a)
+		}
+		if s.Env != nil {
+			for k, v := range s.Env {
+				s.Env[k] = expandEnv(v)
 			}
 		}
 		transport, transportErr := normalizeTransport(s.Transport)
@@ -173,11 +188,28 @@ func validate(cfg *Config) error {
 		if s.Name == "" {
 			return errors.New("server name is required")
 		}
-		if s.URL == "" {
-			return fmt.Errorf("server %q url is required", s.Name)
-		}
-		if _, err := normalizeTransport(s.Transport); err != nil {
+		transport, err := normalizeTransport(s.Transport)
+		if err != nil {
 			return fmt.Errorf("server %q: %w", s.Name, err)
+		}
+		switch transport {
+		case "stdio":
+			if s.Command == "" {
+				return fmt.Errorf("server %q: command is required for stdio transport", s.Name)
+			}
+			if s.URL != "" {
+				return fmt.Errorf("server %q: url is not valid for stdio transport", s.Name)
+			}
+			if len(s.Headers) > 0 || s.HeadersHelper != "" {
+				return fmt.Errorf("server %q: headers/headers_helper are not valid for stdio transport", s.Name)
+			}
+		default: // http or sse
+			if s.URL == "" {
+				return fmt.Errorf("server %q: url is required for %s transport", s.Name, transport)
+			}
+			if s.Command != "" || len(s.Args) > 0 || len(s.Env) > 0 {
+				return fmt.Errorf("server %q: command/args/env are only valid for stdio transport", s.Name)
+			}
 		}
 		if seen[s.Name] {
 			return fmt.Errorf("duplicate server name %q", s.Name)

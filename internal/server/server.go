@@ -192,15 +192,19 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		}
 		return protocol.Response{OK: true, Result: result}
 	case "add_server":
-		if req.Name == "" || req.URL == "" {
-			return protocol.Response{OK: false, Error: "name and url are required"}
+		if req.Name == "" {
+			return protocol.Response{OK: false, Error: "name is required"}
 		}
 		item := config.MCPServer{
-			Name:      req.Name,
-			Alias:     req.Alias,
-			URL:       req.URL,
-			Transport: req.Transport,
-			Headers:   req.Headers,
+			Name:          req.Name,
+			Alias:         req.Alias,
+			URL:           req.URL,
+			Transport:     req.Transport,
+			Headers:       req.Headers,
+			HeadersHelper: req.HeadersHelper,
+			Command:       req.Command,
+			Args:          req.CmdArgs,
+			Env:           req.Env,
 		}
 		config.UpsertServer(s.cfg, item)
 		if err := config.Save(s.configPath, s.cfg); err != nil {
