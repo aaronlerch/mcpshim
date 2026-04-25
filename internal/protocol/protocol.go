@@ -17,6 +17,8 @@ type Request struct {
 	CmdArgs       []string               `json:"cmd_args,omitempty"`
 	Env           map[string]string      `json:"env,omitempty"`
 	Args          map[string]interface{} `json:"args,omitempty"`
+	URI           string                 `json:"uri,omitempty"`
+	PromptArgs    map[string]string      `json:"prompt_args,omitempty"`
 }
 
 type ServerInfo struct {
@@ -28,11 +30,12 @@ type ServerInfo struct {
 }
 
 type ToolInfo struct {
-	Server      string   `json:"server"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Required    []string `json:"required,omitempty"`
-	Properties  []string `json:"properties,omitempty"`
+	Server      string         `json:"server"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Required    []string       `json:"required,omitempty"`
+	Properties  []string       `json:"properties,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 type PropertyDetail struct {
@@ -49,6 +52,51 @@ type ToolDetail struct {
 	Name        string           `json:"name"`
 	Description string           `json:"description,omitempty"`
 	Properties  []PropertyDetail `json:"properties,omitempty"`
+	Meta        map[string]any   `json:"_meta,omitempty"`
+}
+
+type ResourceInfo struct {
+	Server      string `json:"server"`
+	URI         string `json:"uri"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	MIMEType    string `json:"mime_type,omitempty"`
+}
+
+// ResourceContent is the wire form of an MCP ResourceContents entry. Either
+// Text (for text resources) or Blob (base64) is set, never both.
+type ResourceContent struct {
+	URI      string `json:"uri"`
+	MIMEType string `json:"mime_type,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+}
+
+type PromptArg struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type PromptInfo struct {
+	Server      string      `json:"server"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Arguments   []PromptArg `json:"arguments,omitempty"`
+}
+
+// PromptMessage mirrors mcp.PromptMessage. Content shapes vary (text, image,
+// resource reference) so we keep it as raw JSON-y data rather than enumerate.
+type PromptMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type PromptResult struct {
+	Server      string          `json:"server"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Messages    []PromptMessage `json:"messages,omitempty"`
 }
 
 type Status struct {
@@ -69,13 +117,17 @@ type HistoryItem struct {
 }
 
 type Response struct {
-	OK         bool          `json:"ok"`
-	Error      string        `json:"error,omitempty"`
-	Status     *Status       `json:"status,omitempty"`
-	Servers    []ServerInfo  `json:"servers,omitempty"`
-	Tools      []ToolInfo    `json:"tools,omitempty"`
-	History    []HistoryItem `json:"history,omitempty"`
-	ToolDetail *ToolDetail   `json:"tool_detail,omitempty"`
-	Result     interface{}   `json:"result,omitempty"`
-	Text       string        `json:"text,omitempty"`
+	OK               bool              `json:"ok"`
+	Error            string            `json:"error,omitempty"`
+	Status           *Status           `json:"status,omitempty"`
+	Servers          []ServerInfo      `json:"servers,omitempty"`
+	Tools            []ToolInfo        `json:"tools,omitempty"`
+	History          []HistoryItem     `json:"history,omitempty"`
+	ToolDetail       *ToolDetail       `json:"tool_detail,omitempty"`
+	Resources        []ResourceInfo    `json:"resources,omitempty"`
+	ResourceContents []ResourceContent `json:"resource_contents,omitempty"`
+	Prompts          []PromptInfo      `json:"prompts,omitempty"`
+	PromptResult     *PromptResult     `json:"prompt_result,omitempty"`
+	Result           interface{}       `json:"result,omitempty"`
+	Text             string            `json:"text,omitempty"`
 }

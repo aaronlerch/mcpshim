@@ -269,6 +269,96 @@ func Run(binaryName string, argv []string) int {
 			return 1
 		}
 		return runLoginLocal(server, manual)
+	case "resources":
+		fs := flag.NewFlagSet("resources", flag.ContinueOnError)
+		var server string
+		fs.StringVar(&server, "server", "", "server name or alias")
+		_ = fs.Parse(rest)
+		resp, err := call(protocol.Request{Action: "resources", Server: server}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if jsonOut {
+			return printResponse(resp, jsonOut)
+		}
+		if !resp.OK {
+			fmt.Fprintln(os.Stderr, resp.Error)
+			return 1
+		}
+		printResourcesList(resp.Resources)
+		return 0
+	case "read":
+		fs := flag.NewFlagSet("read", flag.ContinueOnError)
+		var server, uri string
+		fs.StringVar(&server, "server", "", "server name or alias")
+		fs.StringVar(&uri, "uri", "", "resource uri")
+		_ = fs.Parse(rest)
+		if server == "" || uri == "" {
+			pos := fs.Args()
+			if server == "" && len(pos) > 0 {
+				server = pos[0]
+				pos = pos[1:]
+			}
+			if uri == "" && len(pos) > 0 {
+				uri = pos[0]
+			}
+		}
+		if server == "" || uri == "" {
+			fmt.Fprintln(os.Stderr, "usage: mcpshim read --server <name> --uri <resource-uri>")
+			return 1
+		}
+		resp, err := call(protocol.Request{Action: "read_resource", Server: server, URI: uri}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if jsonOut {
+			return printResponse(resp, jsonOut)
+		}
+		if !resp.OK {
+			fmt.Fprintln(os.Stderr, resp.Error)
+			return 1
+		}
+		printResourceContents(resp.ResourceContents)
+		return 0
+	case "prompts":
+		fs := flag.NewFlagSet("prompts", flag.ContinueOnError)
+		var server string
+		fs.StringVar(&server, "server", "", "server name or alias")
+		_ = fs.Parse(rest)
+		resp, err := call(protocol.Request{Action: "prompts", Server: server}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if jsonOut {
+			return printResponse(resp, jsonOut)
+		}
+		if !resp.OK {
+			fmt.Fprintln(os.Stderr, resp.Error)
+			return 1
+		}
+		printPromptsList(resp.Prompts)
+		return 0
+	case "get-prompt":
+		fs := flag.NewFlagSet("get-prompt", flag.ContinueOnError)
+		var server, name string
+		var args headerArgs
+		fs.StringVar(&server, "server", "", "server name or alias")
+		fs.StringVar(&name, "name", "", "prompt name")
+		fs.Var(&args, "arg", "prompt argument key=value (repeatable)")
+		_ = fs.Parse(rest)
+		if server == "" || name == "" {
+			fmt.Fprintln(os.Stderr, "usage: mcpshim get-prompt --server <name> --name <prompt> [--arg K=V]")
+			return 1
+		}
+		resp, err := call(protocol.Request{Action: "get_prompt", Server: server, Name: name, PromptArgs: map[string]string(args)}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return printResponse(resp, jsonOut)
 	case "script":
 		return runScriptCommand(rest, socketPath)
 	default:
@@ -625,6 +715,65 @@ func splitNonEmptyLines(text string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func printResourcesList(items []protocol.ResourceInfo) {
+	for _, r := range items {
+		mime := r.MIMEType
+		if mime == "" {
+			mime = "?"
+		}
+		desc := summarizeDescription(r.Description)
+		line := fmt.Sprintf("%s  %s  [%s]", r.Server, r.URI, mime)
+		if r.Name != "" && r.Name != r.URI {
+			line += "  " + r.Name
+		}
+		if desc != "" {
+			line += "  — " + desc
+		}
+		fmt.Println(line)
+	}
+}
+
+func printResourceContents(items []protocol.ResourceContent) {
+	for i, c := range items {
+		if i > 0 {
+			fmt.Println("---")
+		}
+		mime := c.MIMEType
+		if mime == "" {
+			mime = "?"
+		}
+		fmt.Printf("# %s [%s]\n", c.URI, mime)
+		if c.Text != "" {
+			fmt.Println(c.Text)
+		} else if c.Blob != "" {
+			fmt.Printf("(blob, %d base64 bytes)\n", len(c.Blob))
+		}
+	}
+}
+
+func printPromptsList(items []protocol.PromptInfo) {
+	for _, p := range items {
+		args := []string{}
+		for _, a := range p.Arguments {
+			marker := ""
+			if a.Required {
+				marker = "*"
+			}
+			args = append(args, a.Name+marker)
+		}
+		argStr := ""
+		if len(args) > 0 {
+			argStr = " (" + strings.Join(args, ", ") + ")"
+		}
+		desc := summarizeDescription(p.Description)
+		fmt.Printf("%s/%s%s", p.Server, p.Name, argStr)
+		if desc != "" {
+			fmt.Printf("  %s", desc)
+		}
+		fmt.Println()
+	}
 }
 
 func printToolsList(items []protocol.ToolInfo, full bool) {
@@ -1073,6 +1222,10 @@ func usage() {
 	fmt.Println("  login --server name [--manual]")
 	fmt.Println("  status")
 	fmt.Println("  history [--server name] [--tool name] [--limit 50]")
+	fmt.Println("  resources [--server name]")
+	fmt.Println("  read --server name --uri 'protocol://path'")
+	fmt.Println("  prompts [--server name]")
+	fmt.Println("  get-prompt --server name --name promptname [--arg K=V]")
 	fmt.Println("  script [--install] [--dir ~/.local/bin]")
 	fmt.Println("  <server-alias> <tool> [--arg value]")
 }
