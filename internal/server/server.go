@@ -251,6 +251,17 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		}
 		s.registry.UpdateConfig(s.cfg)
 		return protocol.Response{OK: true, Text: "updated authentication"}
+	case "refresh":
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if req.Server != "" {
+			if _, err := s.registry.RefreshServer(ctx, req.Server); err != nil {
+				return protocol.Response{OK: false, Error: err.Error(), Servers: s.registry.Servers()}
+			}
+			return protocol.Response{OK: true, Text: fmt.Sprintf("refreshed %s", req.Server), Servers: s.registry.Servers()}
+		}
+		_ = s.registry.Refresh(ctx)
+		return protocol.Response{OK: true, Text: "refreshed all servers", Servers: s.registry.Servers()}
 	case "reload":
 		cfg, err := config.Load(s.configPath)
 		if err != nil {

@@ -143,6 +143,7 @@ All paths follow XDG defaults where applicable.
 | `mcpshim read --server s --uri 'protocol://path'`     | Read a single resource           |
 | `mcpshim prompts [--server s]`                        | List MCP prompts                 |
 | `mcpshim get-prompt --server s --name p [--arg K=V]`  | Render a prompt with arguments   |
+| `mcpshim refresh [--server s]`                        | Force-refresh tools/state now    |
 | `mcpshim script [--install] [--dir ~/.local/bin]`     | Generate/install alias wrappers  |
 
 ### Register MCP servers
@@ -177,6 +178,22 @@ mcpshim call --server notion --tool search --query "projects" --limit 10 --archi
 ```
 
 > Tip: JSON output is automatic when stdout is not a terminal. Use `--json` to force JSON parsing behavior in interactive sessions.
+
+---
+
+## Server Status & Resilience
+
+Every registered server carries a status that you can see via `mcpshim servers`:
+
+| Status          | Meaning                                                      |
+| --------------- | ------------------------------------------------------------ |
+| `healthy`       | Last refresh succeeded.                                      |
+| `degraded`      | First failure observed; auto-retry pending.                  |
+| `failed`        | Multiple consecutive failures; backing off.                  |
+| `auth_required` | Server returned 401; run `mcpshim login --server <name>`.    |
+| `unknown`       | No refresh has been attempted yet.                           |
+
+Failed refreshes are retried in the background with exponential backoff (5s → 15s → 30s → 60s → 2m → 5m, then capped). Auth-required servers do **not** auto-retry; complete the login flow first. Use `mcpshim refresh [--server name]` to force an immediate refresh and reset backoff.
 
 ---
 

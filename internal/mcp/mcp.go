@@ -29,10 +29,28 @@ type Registry struct {
 	store      *store.Store
 	toolCache  map[string][]protocol.ToolInfo
 	cacheStamp time.Time
+	states     map[string]*serverState
+	backoff    []time.Duration
 }
 
 func NewRegistry(cfg *config.Config, dbStore *store.Store) *Registry {
-	return &Registry{cfg: cfg, store: dbStore, toolCache: map[string][]protocol.ToolInfo{}}
+	return NewRegistryWithBackoff(cfg, dbStore, DefaultBackoff)
+}
+
+// NewRegistryWithBackoff lets tests inject a deterministic backoff schedule
+// (e.g. zero-duration delays) without mutating package globals.
+func NewRegistryWithBackoff(cfg *config.Config, dbStore *store.Store, backoff []time.Duration) *Registry {
+	r := &Registry{
+		cfg:       cfg,
+		store:     dbStore,
+		toolCache: map[string][]protocol.ToolInfo{},
+		states:    map[string]*serverState{},
+		backoff:   backoff,
+	}
+	for _, s := range cfg.Servers {
+		r.states[s.Name] = newServerState()
+	}
+	return r
 }
 
 func (r *Registry) UpdateConfig(cfg *config.Config) {
@@ -41,6 +59,23 @@ func (r *Registry) UpdateConfig(cfg *config.Config) {
 	r.cfg = cfg
 	r.toolCache = map[string][]protocol.ToolInfo{}
 	r.cacheStamp = time.Time{}
+
+	// Cancel and drop state for servers that were removed; preserve state for
+	// servers that are still configured; create blank state for new ones.
+	keep := map[string]*serverState{}
+	for _, s := range cfg.Servers {
+		if existing, ok := r.states[s.Name]; ok {
+			keep[s.Name] = existing
+		} else {
+			keep[s.Name] = newServerState()
+		}
+	}
+	for name, st := range r.states {
+		if _, kept := keep[name]; !kept {
+			st.cancelRetry()
+		}
+	}
+	r.states = keep
 }
 
 func (r *Registry) Servers() []protocol.ServerInfo {
@@ -48,15 +83,36 @@ func (r *Registry) Servers() []protocol.ServerInfo {
 	defer r.mu.RUnlock()
 	out := make([]protocol.ServerInfo, 0, len(r.cfg.Servers))
 	for _, s := range r.cfg.Servers {
-		out = append(out, protocol.ServerInfo{
+		info := protocol.ServerInfo{
 			Name:      s.Name,
 			Alias:     s.Alias,
 			URL:       s.URL,
 			Transport: s.Transport,
 			HasAuth:   hasAuthorizationHeader(s.Headers),
-		})
+		}
+		if state, ok := r.states[s.Name]; ok {
+			status, lastErr, lastSuccess, attempts := state.snapshot()
+			info.Status = string(status)
+			info.LastError = lastErr
+			info.AttemptCount = attempts
+			if !lastSuccess.IsZero() {
+				info.LastSuccessAt = lastSuccess
+			}
+		}
+		out = append(out, info)
 	}
 	return out
+}
+
+func (r *Registry) stateFor(name string) *serverState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, ok := r.states[name]
+	if !ok {
+		st = newServerState()
+		r.states[name] = st
+	}
+	return st
 }
 
 func (r *Registry) ListTools(ctx context.Context, server string) ([]protocol.ToolInfo, error) {
@@ -95,24 +151,89 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	r.mu.RUnlock()
 
 	log.Printf("[registry] refresh starting for %d server(s)", len(cfg.Servers))
-	cache := map[string][]protocol.ToolInfo{}
 	for _, s := range cfg.Servers {
-		log.Printf("[registry] refreshing server %q (transport=%s, has_auth_header=%v)", s.Name, s.Transport, hasAuthorizationHeader(s.Headers))
-		tools, err := fetchToolsForServer(ctx, s, r.store, false)
-		if err != nil {
-			log.Printf("[registry] refresh failed for %q: %v", s.Name, err)
-			continue
+		_, _ = r.refreshServer(ctx, s)
+	}
+	log.Printf("[registry] refresh complete")
+	return nil
+}
+
+// RefreshServer refreshes a single server by name and returns its tools. A
+// successful refresh cancels any pending backoff retry; a failure schedules
+// (or extends) one.
+func (r *Registry) RefreshServer(ctx context.Context, name string) ([]protocol.ToolInfo, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+	s, ok := findServer(cfg, name)
+	if !ok {
+		return nil, fmt.Errorf("unknown server %q", name)
+	}
+	return r.refreshServer(ctx, s)
+}
+
+// refreshServer is the internal worker used by Refresh and RefreshServer.
+// It updates per-server state and (re)schedules backoff retries.
+func (r *Registry) refreshServer(ctx context.Context, s config.MCPServer) ([]protocol.ToolInfo, error) {
+	state := r.stateFor(s.Name)
+	state.mu.Lock()
+	state.lastAttemptAt = time.Now().UTC()
+	state.mu.Unlock()
+
+	log.Printf("[registry] refreshing server %q (transport=%s, has_auth_header=%v)", s.Name, s.Transport, hasAuthorizationHeader(s.Headers))
+	tools, err := fetchToolsForServer(ctx, s, r.store, false)
+	if err != nil {
+		authReq := isAuthRequiredError(err)
+		idx := state.recordFailure(err, authReq)
+		log.Printf("[registry] refresh failed for %q (attempt=%d, auth_required=%v): %v", s.Name, idx+1, authReq, err)
+		r.mu.Lock()
+		delete(r.toolCache, s.Name)
+		r.mu.Unlock()
+		// Don't auto-retry when the server explicitly needs the user to log in.
+		if !authReq {
+			r.scheduleBackoffRetry(s, idx)
 		}
-		log.Printf("[registry] refresh succeeded for %q: %d tools", s.Name, len(tools))
-		cache[s.Name] = tools
+		return nil, err
 	}
 
+	state.recordSuccess()
+	log.Printf("[registry] refresh succeeded for %q: %d tools", s.Name, len(tools))
+
 	r.mu.Lock()
-	r.toolCache = cache
+	r.toolCache[s.Name] = tools
 	r.cacheStamp = time.Now().UTC()
 	r.mu.Unlock()
-	log.Printf("[registry] refresh complete, %d server(s) cached", len(cache))
-	return nil
+	return tools, nil
+}
+
+// scheduleBackoffRetry spawns a goroutine that re-runs refreshServer after
+// the configured delay. A subsequent manual refresh or remove cancels it.
+func (r *Registry) scheduleBackoffRetry(s config.MCPServer, attempt int) {
+	delay := backoffDelay(r.backoff, attempt)
+	if delay <= 0 {
+		return
+	}
+	state := r.stateFor(s.Name)
+	cancel := state.scheduleRetry(delay)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-cancel:
+			return
+		case <-timer.C:
+		}
+		// Re-resolve the server config in case it was edited or removed.
+		r.mu.RLock()
+		current, ok := findServer(r.cfg, s.Name)
+		r.mu.RUnlock()
+		if !ok {
+			return
+		}
+		ctx, cancelCtx := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelCtx()
+		_, _ = r.refreshServer(ctx, current)
+	}()
 }
 
 func (r *Registry) ToolCount() int {
