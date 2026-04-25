@@ -76,6 +76,7 @@ func (s *Server) Run() error {
 	defer stop()
 
 	_ = s.registry.Refresh(context.Background())
+	s.writeManifest()
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	go func() {
@@ -85,6 +86,7 @@ func (s *Server) Run() error {
 				return
 			case <-ticker.C:
 				_ = s.registry.Refresh(context.Background())
+				s.writeManifest()
 			}
 		}
 	}()
@@ -226,6 +228,7 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 		}
 		s.registry.UpdateConfig(s.cfg)
 		_ = s.registry.Refresh(context.Background())
+		s.writeManifest()
 		return protocol.Response{OK: true, Text: fmt.Sprintf("added server %s", req.Name)}
 	case "remove_server":
 		if req.Name == "" {
@@ -239,6 +242,7 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 		}
 		s.registry.UpdateConfig(s.cfg)
 		_ = s.registry.Refresh(context.Background())
+		s.writeManifest()
 		return protocol.Response{OK: true, Text: fmt.Sprintf("removed server %s", req.Name)}
 	case "set_auth":
 		if req.Name == "" {
@@ -269,17 +273,21 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 			}
 		}
 		s.registry.UpdateConfig(s.cfg)
+		s.writeManifest()
 		return protocol.Response{OK: true, Text: "updated authentication"}
 	case "refresh":
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		if req.Server != "" {
 			if _, err := s.registry.RefreshServer(ctx, req.Server); err != nil {
+				s.writeManifest()
 				return protocol.Response{OK: false, Error: err.Error(), Servers: s.registry.Servers()}
 			}
+			s.writeManifest()
 			return protocol.Response{OK: true, Text: fmt.Sprintf("refreshed %s", req.Server), Servers: s.registry.Servers()}
 		}
 		_ = s.registry.Refresh(ctx)
+		s.writeManifest()
 		return protocol.Response{OK: true, Text: "refreshed all servers", Servers: s.registry.Servers()}
 	case "reload":
 		cfg, err := config.Load(s.configPath)
@@ -300,6 +308,7 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 		s.cfg = cfg
 		s.registry.UpdateConfig(cfg)
 		_ = s.registry.Refresh(context.Background())
+		s.writeManifest()
 		return protocol.Response{OK: true, Text: "reloaded config"}
 	case "resources":
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -339,6 +348,18 @@ func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.R
 			return protocol.Response{OK: false, Error: err.Error()}
 		}
 		return protocol.Response{OK: true, PromptResult: result}
+	case "manifest":
+		// Always regenerate on demand so the response reflects live state.
+		content, err := s.manifestContent()
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		s.writeManifest()
+		return protocol.Response{
+			OK:              true,
+			ManifestPath:    s.cfg.Server.ManifestPath,
+			ManifestContent: content,
+		}
 	case "logout":
 		if req.Server == "" {
 			return protocol.Response{OK: false, Error: "server is required"}

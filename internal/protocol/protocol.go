@@ -159,4 +159,6 @@ type Response struct {
 	Result           interface{}         `json:"result,omitempty"`
 	Text             string              `json:"text,omitempty"`
 	Elicitation      *ElicitationRequest `json:"elicitation,omitempty"`
+	ManifestPath     string              `json:"manifest_path,omitempty"`
+	ManifestContent  string              `json:"manifest_content,omitempty"`
 }

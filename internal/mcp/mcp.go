@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mcpshim/mcpshim/internal/config"
+	"github.com/mcpshim/mcpshim/internal/manifest"
 	"github.com/mcpshim/mcpshim/internal/protocol"
 	"github.com/mcpshim/mcpshim/internal/store"
 )
@@ -234,6 +236,53 @@ func (r *Registry) scheduleBackoffRetry(s config.MCPServer, attempt int) {
 		defer cancelCtx()
 		_, _ = r.refreshServer(ctx, current)
 	}()
+}
+
+// ManifestSnapshot captures everything the manifest renderer needs in a
+// single read-locked pass.
+func (r *Registry) ManifestSnapshot() manifest.Snapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	servers := make([]protocol.ServerInfo, 0, len(r.cfg.Servers))
+	configBy := make(map[string]config.MCPServer, len(r.cfg.Servers))
+	for _, s := range r.cfg.Servers {
+		info := protocol.ServerInfo{
+			Name:      s.Name,
+			Alias:     s.Alias,
+			URL:       s.URL,
+			Transport: s.Transport,
+			HasAuth:   hasAuthorizationHeader(s.Headers),
+		}
+		if state, ok := r.states[s.Name]; ok {
+			status, lastErr, lastSuccess, attempts := state.snapshot()
+			info.Status = string(status)
+			info.LastError = lastErr
+			info.AttemptCount = attempts
+			if !lastSuccess.IsZero() {
+				info.LastSuccessAt = lastSuccess
+			}
+		}
+		servers = append(servers, info)
+		configBy[s.Name] = s
+	}
+	tools := make(map[string][]protocol.ToolInfo, len(r.toolCache))
+	for name, items := range r.toolCache {
+		copyItems := make([]protocol.ToolInfo, len(items))
+		copy(copyItems, items)
+		tools[name] = copyItems
+	}
+	return manifest.Snapshot{
+		GeneratedAt: time.Now().UTC(),
+		Servers:     servers,
+		Tools:       tools,
+		ConfigBy:    configBy,
+	}
+}
+
+// RenderManifest writes the markdown manifest to w using the registry's
+// current state.
+func (r *Registry) RenderManifest(w io.Writer) error {
+	return manifest.Render(w, r.ManifestSnapshot())
 }
 
 func (r *Registry) ToolCount() int {
