@@ -22,11 +22,15 @@ type Request struct {
 }
 
 type ServerInfo struct {
-	Name      string `json:"name"`
-	Alias     string `json:"alias,omitempty"`
-	URL       string `json:"url"`
-	Transport string `json:"transport"`
-	HasAuth   bool   `json:"has_auth"`
+	Name          string    `json:"name"`
+	Alias         string    `json:"alias,omitempty"`
+	URL           string    `json:"url"`
+	Transport     string    `json:"transport"`
+	HasAuth       bool      `json:"has_auth"`
+	Status        string    `json:"status,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastSuccessAt time.Time `json:"last_success_at,omitzero"`
+	AttemptCount  int       `json:"attempt_count,omitempty"`
 }
 
 type ToolInfo struct {

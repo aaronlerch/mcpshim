@@ -100,7 +100,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 	if !interactive {
 		log.Printf("[oauth:%s] full re-authorization needed but not interactive — cannot complete login", s.Name)
 		var zero T
-		return zero, fmt.Errorf("server %q requires oauth authorization; run a direct command like mcpshim tools --server %s to complete login", s.Name, s.Name)
+		return zero, fmt.Errorf("server %q requires oauth authorization; run `mcpshim login --server %s` to complete login: %w", s.Name, s.Name, err)
 	}
 	if callback == nil {
 		var zero T

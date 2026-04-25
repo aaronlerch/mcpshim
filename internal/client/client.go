@@ -241,6 +241,17 @@ func Run(binaryName string, argv []string) int {
 			return 1
 		}
 		return printResponse(resp, jsonOut)
+	case "refresh":
+		fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
+		var server string
+		fs.StringVar(&server, "server", "", "server name or alias (omit to refresh all)")
+		_ = fs.Parse(rest)
+		resp, err := call(protocol.Request{Action: "refresh", Server: server}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return printResponse(resp, jsonOut)
 	case "validate":
 		fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 		configPath := fs.String("config", config.DefaultConfigPath(), "config path to validate")
@@ -717,6 +728,29 @@ func splitNonEmptyLines(text string) []string {
 	return out
 }
 
+func serverStatusBadge(status string) string {
+	switch status {
+	case "healthy":
+		return "[ok]    "
+	case "degraded":
+		return "[degr]  "
+	case "failed":
+		return "[fail]  "
+	case "auth_required":
+		return "[auth]  "
+	default:
+		return "[?]     "
+	}
+}
+
+func truncateForDisplay(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
+}
+
 func printResourcesList(items []protocol.ResourceInfo) {
 	for _, r := range items {
 		mime := r.MIMEType
@@ -1021,7 +1055,23 @@ func printResponse(resp *protocol.Response, jsonOut bool) int {
 		}
 		if len(resp.Servers) > 0 {
 			for _, s := range resp.Servers {
-				fmt.Printf("%s (%s) %s\n", s.Name, s.Transport, s.URL)
+				status := s.Status
+				if status == "" {
+					status = "unknown"
+				}
+				badge := serverStatusBadge(status)
+				target := s.URL
+				if target == "" {
+					target = "(stdio)"
+				}
+				line := fmt.Sprintf("%s %s (%s) %s", badge, s.Name, s.Transport, target)
+				if s.AttemptCount > 0 && status != "healthy" {
+					line += fmt.Sprintf(" attempts=%d", s.AttemptCount)
+				}
+				if s.LastError != "" && status != "healthy" {
+					line += "  err=" + truncateForDisplay(s.LastError, 80)
+				}
+				fmt.Println(line)
 			}
 		}
 		if len(resp.History) > 0 {
@@ -1218,6 +1268,7 @@ func usage() {
 	fmt.Println("  set auth --server x [--header K=V]")
 	fmt.Println("  remove --name x")
 	fmt.Println("  reload")
+	fmt.Println("  refresh [--server name]")
 	fmt.Println("  validate [--config path]")
 	fmt.Println("  login --server name [--manual]")
 	fmt.Println("  status")

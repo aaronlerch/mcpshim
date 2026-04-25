@@ -87,3 +87,25 @@ func TestHandleResourcesUnknownServer(t *testing.T) {
 		t.Fatalf("error = %q", resp.Error)
 	}
 }
+
+func TestHandleRefreshAllEmpty(t *testing.T) {
+	s := newTestServer(t)
+	resp := s.handle(protocol.Request{Action: "refresh"})
+	if !resp.OK {
+		t.Fatalf("refresh-all on empty config should succeed, got error: %q", resp.Error)
+	}
+	if resp.Text == "" {
+		t.Error("expected status text in refresh response")
+	}
+}
+
+func TestHandleRefreshUnknownServer(t *testing.T) {
+	s := newTestServer(t)
+	resp := s.handle(protocol.Request{Action: "refresh", Server: "missing"})
+	if resp.OK {
+		t.Fatal("expected error for unknown server")
+	}
+	if !strings.Contains(resp.Error, "unknown server") {
+		t.Fatalf("error = %q", resp.Error)
+	}
+}
