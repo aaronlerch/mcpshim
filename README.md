@@ -144,10 +144,25 @@ All paths follow XDG defaults where applicable.
 ### Register MCP servers
 
 ```bash
+# Remote HTTP server with static auth
 mcpshim add --name notion --alias notion --transport http --url https://example.com/mcp
 mcpshim set auth --server notion --header "Authorization=Bearer $NOTION_MCP_TOKEN"
+
+# Remote server with a dynamic-auth helper (matches Claude Code's headersHelper).
+# The helper is run before each connect; stdout must be a JSON {key:value} of headers.
+# It receives MCPSHIM_SERVER_NAME and MCPSHIM_SERVER_URL in env. 10s timeout, no caching.
+mcpshim add --name internal --transport http --url https://mcp.internal.example.com \
+  --headers-helper /opt/bin/get-mcp-auth-headers.sh
+
+# Local stdio MCP server (subprocess)
+mcpshim add --name filesystem --alias fs --transport stdio \
+  --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /Users/me/projects \
+  --env LOG_LEVEL=info
+
 mcpshim reload
 ```
+
+Config values support `${VAR}` and `${VAR:-default}` expansion in URLs, headers, command, args, and env.
 
 ### Dynamic flags
 
@@ -208,6 +223,8 @@ History is stored locally in SQLite (`call_history` table).
 {"action":"call","server":"notion","tool":"search","args":{"query":"roadmap"}}
 {"action":"history","server":"notion","limit":20}
 {"action":"add_server","name":"notion","alias":"notion","url":"https://mcp.notion.com/mcp","transport":"http"}
+{"action":"add_server","name":"fs","transport":"stdio","command":"npx","cmd_args":["-y","@modelcontextprotocol/server-filesystem","/tmp"],"env":{"LOG_LEVEL":"info"}}
+{"action":"add_server","name":"internal","transport":"http","url":"https://mcp.internal.example.com","headers_helper":"/opt/bin/get-mcp-auth-headers.sh"}
 {"action":"set_auth","name":"notion","headers":{"Authorization":"Bearer ..."}}
 {"action":"reload"}
 ```

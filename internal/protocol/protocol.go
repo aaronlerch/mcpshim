@@ -3,16 +3,20 @@ package protocol
 import "time"
 
 type Request struct {
-	Action    string                 `json:"action"`
-	Name      string                 `json:"name,omitempty"`
-	Server    string                 `json:"server,omitempty"`
-	Tool      string                 `json:"tool,omitempty"`
-	Limit     int                    `json:"limit,omitempty"`
-	Alias     string                 `json:"alias,omitempty"`
-	URL       string                 `json:"url,omitempty"`
-	Transport string                 `json:"transport,omitempty"`
-	Headers   map[string]string      `json:"headers,omitempty"`
-	Args      map[string]interface{} `json:"args,omitempty"`
+	Action        string                 `json:"action"`
+	Name          string                 `json:"name,omitempty"`
+	Server        string                 `json:"server,omitempty"`
+	Tool          string                 `json:"tool,omitempty"`
+	Limit         int                    `json:"limit,omitempty"`
+	Alias         string                 `json:"alias,omitempty"`
+	URL           string                 `json:"url,omitempty"`
+	Transport     string                 `json:"transport,omitempty"`
+	Headers       map[string]string      `json:"headers,omitempty"`
+	HeadersHelper string                 `json:"headers_helper,omitempty"`
+	Command       string                 `json:"command,omitempty"`
+	CmdArgs       []string               `json:"cmd_args,omitempty"`
+	Env           map[string]string      `json:"env,omitempty"`
+	Args          map[string]interface{} `json:"args,omitempty"`
 }
 
 type ServerInfo struct {

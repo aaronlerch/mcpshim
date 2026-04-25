@@ -48,6 +48,20 @@ func (h *headerArgs) Set(value string) error {
 	(*h)[key] = val
 	return nil
 }
+
+type stringSliceArgs []string
+
+func (s *stringSliceArgs) String() string {
+	if s == nil {
+		return ""
+	}
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceArgs) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 func Run(binaryName string, argv []string) int {
 	if binaryName == "" {
 		binaryName = filepath.Base(os.Args[0])
@@ -153,16 +167,34 @@ func Run(binaryName string, argv []string) int {
 		return runCall(rest, socketPath, jsonOut)
 	case "add":
 		fs := flag.NewFlagSet("add", flag.ContinueOnError)
-		var name, alias, url, transport string
+		var name, alias, url, transport, command, headersHelper string
 		var headers headerArgs
+		var cmdArgs stringSliceArgs
+		var env headerArgs
 		fs.StringVar(&name, "name", "", "server name")
 		fs.StringVar(&alias, "alias", "", "short alias")
-		fs.StringVar(&url, "url", "", "mcp endpoint")
-		fs.StringVar(&transport, "transport", "http", "http|sse")
-		fs.Var(&headers, "header", "request header key=value (repeatable)")
+		fs.StringVar(&url, "url", "", "mcp endpoint (http/sse only)")
+		fs.StringVar(&transport, "transport", "http", "http|sse|stdio")
+		fs.Var(&headers, "header", "request header key=value (repeatable, http/sse only)")
+		fs.StringVar(&headersHelper, "headers-helper", "", "shell command producing JSON header map (http/sse only)")
+		fs.StringVar(&command, "command", "", "executable to launch (stdio only)")
+		fs.Var(&cmdArgs, "arg", "command argument (repeatable, stdio only)")
+		fs.Var(&env, "env", "environment variable key=value (repeatable, stdio only)")
 		_ = fs.Parse(rest)
 		headersMap := map[string]string(headers)
-		resp, err := call(protocol.Request{Action: "add_server", Name: name, Alias: alias, URL: url, Transport: transport, Headers: headersMap}, socketPath)
+		envMap := map[string]string(env)
+		resp, err := call(protocol.Request{
+			Action:        "add_server",
+			Name:          name,
+			Alias:         alias,
+			URL:           url,
+			Transport:     transport,
+			Headers:       headersMap,
+			HeadersHelper: headersHelper,
+			Command:       command,
+			CmdArgs:       []string(cmdArgs),
+			Env:           envMap,
+		}, socketPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -1032,7 +1064,8 @@ func usage() {
 	fmt.Println("  inspect --server name --tool name")
 	fmt.Println("  call --server name --tool name [--json] [--arg value]")
 	fmt.Println("       use '--' before tool args to pass reserved names (e.g. --help, --server)")
-	fmt.Println("  add --name x --url http://... [--transport http|sse] [--alias short] [--header K=V]")
+	fmt.Println("  add --name x --url http://... [--transport http|sse] [--alias short] [--header K=V] [--headers-helper 'cmd']")
+	fmt.Println("  add --name x --transport stdio --command bin [--arg a] [--env K=V]")
 	fmt.Println("  set auth --server x [--header K=V]")
 	fmt.Println("  remove --name x")
 	fmt.Println("  reload")
