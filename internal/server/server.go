@@ -271,6 +271,44 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		s.registry.UpdateConfig(cfg)
 		_ = s.registry.Refresh(context.Background())
 		return protocol.Response{OK: true, Text: "reloaded config"}
+	case "resources":
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		items, err := s.registry.ListResources(ctx, req.Server)
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		return protocol.Response{OK: true, Resources: items}
+	case "read_resource":
+		if req.Server == "" || req.URI == "" {
+			return protocol.Response{OK: false, Error: "server and uri are required"}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		contents, err := s.registry.ReadResource(ctx, req.Server, req.URI)
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		return protocol.Response{OK: true, ResourceContents: contents}
+	case "prompts":
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		items, err := s.registry.ListPrompts(ctx, req.Server)
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		return protocol.Response{OK: true, Prompts: items}
+	case "get_prompt":
+		if req.Server == "" || req.Name == "" {
+			return protocol.Response{OK: false, Error: "server and name are required"}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		result, err := s.registry.GetPrompt(ctx, req.Server, req.Name, req.PromptArgs)
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		return protocol.Response{OK: true, PromptResult: result}
 	case "login":
 		if req.Server == "" {
 			return protocol.Response{OK: false, Error: "server is required"}

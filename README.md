@@ -139,6 +139,10 @@ All paths follow XDG defaults where applicable.
 | `mcpshim validate [--config path]`                    | Validate config file             |
 | `mcpshim login --server s [--manual]`                 | Complete OAuth login flow        |
 | `mcpshim history [--server s] [--tool t] [--limit n]` | Show persisted call history      |
+| `mcpshim resources [--server s]`                      | List MCP resources               |
+| `mcpshim read --server s --uri 'protocol://path'`     | Read a single resource           |
+| `mcpshim prompts [--server s]`                        | List MCP prompts                 |
+| `mcpshim get-prompt --server s --name p [--arg K=V]`  | Render a prompt with arguments   |
 | `mcpshim script [--install] [--dir ~/.local/bin]`     | Generate/install alias wrappers  |
 
 ### Register MCP servers
@@ -225,6 +229,10 @@ History is stored locally in SQLite (`call_history` table).
 {"action":"add_server","name":"notion","alias":"notion","url":"https://mcp.notion.com/mcp","transport":"http"}
 {"action":"add_server","name":"fs","transport":"stdio","command":"npx","cmd_args":["-y","@modelcontextprotocol/server-filesystem","/tmp"],"env":{"LOG_LEVEL":"info"}}
 {"action":"add_server","name":"internal","transport":"http","url":"https://mcp.internal.example.com","headers_helper":"/opt/bin/get-mcp-auth-headers.sh"}
+{"action":"resources","server":"fs"}
+{"action":"read_resource","server":"fs","uri":"file:///tmp/notes.md"}
+{"action":"prompts","server":"github"}
+{"action":"get_prompt","server":"github","name":"summarize_pr","prompt_args":{"pr":"123"}}
 {"action":"set_auth","name":"notion","headers":{"Authorization":"Bearer ..."}}
 {"action":"reload"}
 ```

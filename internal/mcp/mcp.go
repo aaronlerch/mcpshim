@@ -147,6 +147,7 @@ func (r *Registry) InspectTool(ctx context.Context, server, tool string) (*proto
 				Name:        t.Name,
 				Description: t.Description,
 				Properties:  parseSchemaDetail(t.InputSchema, required),
+				Meta:        metaToMap(t.Meta),
 			}, nil
 		}
 	}
@@ -186,6 +187,202 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 	return res, nil
 }
 
+func (r *Registry) ListResources(ctx context.Context, server string) ([]protocol.ResourceInfo, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	collect := func(s config.MCPServer) ([]protocol.ResourceInfo, error) {
+		raw, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.Resource, error) {
+			res, err := cli.ListResources(ctx, mcpproto.ListResourcesRequest{})
+			if err != nil {
+				return nil, err
+			}
+			return res.Resources, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]protocol.ResourceInfo, 0, len(raw))
+		for _, res := range raw {
+			out = append(out, protocol.ResourceInfo{
+				Server:      s.Name,
+				URI:         res.URI,
+				Name:        res.Name,
+				Description: res.Description,
+				MIMEType:    res.MIMEType,
+			})
+		}
+		return out, nil
+	}
+
+	if server != "" {
+		s, ok := findServer(cfg, server)
+		if !ok {
+			return nil, fmt.Errorf("unknown server %q", server)
+		}
+		return collect(s)
+	}
+
+	all := []protocol.ResourceInfo{}
+	for _, s := range cfg.Servers {
+		items, err := collect(s)
+		if err != nil {
+			log.Printf("[registry] list_resources failed for %q: %v", s.Name, err)
+			continue
+		}
+		all = append(all, items...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Server == all[j].Server {
+			return all[i].URI < all[j].URI
+		}
+		return all[i].Server < all[j].Server
+	})
+	return all, nil
+}
+
+func (r *Registry) ReadResource(ctx context.Context, server, uri string) ([]protocol.ResourceContent, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	s, ok := findServer(cfg, server)
+	if !ok {
+		return nil, fmt.Errorf("unknown server %q", server)
+	}
+	if uri == "" {
+		return nil, fmt.Errorf("resource uri is required")
+	}
+
+	contents, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.ResourceContents, error) {
+		req := mcpproto.ReadResourceRequest{}
+		req.Params.URI = uri
+		res, err := cli.ReadResource(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return res.Contents, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]protocol.ResourceContent, 0, len(contents))
+	for _, c := range contents {
+		switch tc := c.(type) {
+		case mcpproto.TextResourceContents:
+			out = append(out, protocol.ResourceContent{URI: tc.URI, MIMEType: tc.MIMEType, Text: tc.Text})
+		case mcpproto.BlobResourceContents:
+			out = append(out, protocol.ResourceContent{URI: tc.URI, MIMEType: tc.MIMEType, Blob: tc.Blob})
+		default:
+			// unknown content shape — best-effort marshal
+			data, jerr := json.Marshal(c)
+			if jerr == nil {
+				out = append(out, protocol.ResourceContent{Text: string(data)})
+			}
+		}
+	}
+	return out, nil
+}
+
+func (r *Registry) ListPrompts(ctx context.Context, server string) ([]protocol.PromptInfo, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	collect := func(s config.MCPServer) ([]protocol.PromptInfo, error) {
+		raw, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.Prompt, error) {
+			res, err := cli.ListPrompts(ctx, mcpproto.ListPromptsRequest{})
+			if err != nil {
+				return nil, err
+			}
+			return res.Prompts, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]protocol.PromptInfo, 0, len(raw))
+		for _, p := range raw {
+			args := make([]protocol.PromptArg, 0, len(p.Arguments))
+			for _, a := range p.Arguments {
+				args = append(args, protocol.PromptArg{
+					Name:        a.Name,
+					Description: a.Description,
+					Required:    a.Required,
+				})
+			}
+			out = append(out, protocol.PromptInfo{
+				Server:      s.Name,
+				Name:        p.Name,
+				Description: p.Description,
+				Arguments:   args,
+			})
+		}
+		return out, nil
+	}
+
+	if server != "" {
+		s, ok := findServer(cfg, server)
+		if !ok {
+			return nil, fmt.Errorf("unknown server %q", server)
+		}
+		return collect(s)
+	}
+
+	all := []protocol.PromptInfo{}
+	for _, s := range cfg.Servers {
+		items, err := collect(s)
+		if err != nil {
+			log.Printf("[registry] list_prompts failed for %q: %v", s.Name, err)
+			continue
+		}
+		all = append(all, items...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Server == all[j].Server {
+			return all[i].Name < all[j].Name
+		}
+		return all[i].Server < all[j].Server
+	})
+	return all, nil
+}
+
+func (r *Registry) GetPrompt(ctx context.Context, server, name string, args map[string]string) (*protocol.PromptResult, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	s, ok := findServer(cfg, server)
+	if !ok {
+		return nil, fmt.Errorf("unknown server %q", server)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("prompt name is required")
+	}
+
+	res, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) (*mcpproto.GetPromptResult, error) {
+		req := mcpproto.GetPromptRequest{}
+		req.Params.Name = name
+		req.Params.Arguments = args
+		return cli.GetPrompt(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	messages := make([]protocol.PromptMessage, 0, len(res.Messages))
+	for _, m := range res.Messages {
+		messages = append(messages, protocol.PromptMessage{Role: string(m.Role), Content: m.Content})
+	}
+	return &protocol.PromptResult{
+		Server:      s.Name,
+		Name:        name,
+		Description: res.Description,
+		Messages:    messages,
+	}, nil
+}
+
 func (r *Registry) Login(ctx context.Context, server string, manual bool) error {
 	r.mu.RLock()
 	cfg := r.cfg
@@ -213,9 +410,29 @@ func fetchToolsForServer(ctx context.Context, s config.MCPServer, dbStore *store
 			Description: t.Description,
 			Required:    required,
 			Properties:  properties,
+			Meta:        metaToMap(t.Meta),
 		})
 	}
 	return items, nil
+}
+
+// metaToMap flattens an MCP Meta struct into a JSON-serializable map. Returns
+// nil if the meta is empty so the wire response stays clean.
+func metaToMap(m *mcpproto.Meta) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if m.ProgressToken != nil {
+		out["progressToken"] = m.ProgressToken
+	}
+	for k, v := range m.AdditionalFields {
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func fetchToolsRaw(ctx context.Context, s config.MCPServer, dbStore *store.Store, interactive bool) ([]mcpproto.Tool, error) {
@@ -307,6 +524,10 @@ type compatibleClient interface {
 	Initialize(ctx context.Context, request mcpproto.InitializeRequest) (*mcpproto.InitializeResult, error)
 	ListTools(ctx context.Context, req mcpproto.ListToolsRequest) (*mcpproto.ListToolsResult, error)
 	CallTool(ctx context.Context, req mcpproto.CallToolRequest) (*mcpproto.CallToolResult, error)
+	ListResources(ctx context.Context, req mcpproto.ListResourcesRequest) (*mcpproto.ListResourcesResult, error)
+	ReadResource(ctx context.Context, req mcpproto.ReadResourceRequest) (*mcpproto.ReadResourceResult, error)
+	ListPrompts(ctx context.Context, req mcpproto.ListPromptsRequest) (*mcpproto.ListPromptsResult, error)
+	GetPrompt(ctx context.Context, req mcpproto.GetPromptRequest) (*mcpproto.GetPromptResult, error)
 	Close() error
 }
 
