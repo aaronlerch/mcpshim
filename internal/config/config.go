@@ -18,8 +18,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	SocketPath string `yaml:"socket_path"`
-	DBPath     string `yaml:"db_path"`
+	SocketPath   string `yaml:"socket_path"`
+	DBPath       string `yaml:"db_path"`
+	ManifestPath string `yaml:"manifest_path,omitempty"`
 }
 
 type MCPServer struct {
@@ -68,6 +69,19 @@ func DefaultDBPath() string {
 	return filepath.Join(homeDir(), ".local", "share", "mcpshim", "mcpshim.db")
 }
 
+// DefaultManifestPath returns the default location of the live manifest file.
+// If dbPath is set, the manifest sits in the same directory next to the db.
+// Otherwise it falls back to the XDG data dir.
+func DefaultManifestPath(dbPath string) string {
+	if dbPath != "" {
+		return filepath.Join(filepath.Dir(dbPath), "manifest.md")
+	}
+	if dir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dir != "" {
+		return filepath.Join(dir, "mcpshim", "manifest.md")
+	}
+	return filepath.Join(homeDir(), ".local", "share", "mcpshim", "manifest.md")
+}
+
 func xdgConfigHome() string {
 	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
 		return dir
@@ -98,6 +112,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.DBPath == "" {
 		cfg.Server.DBPath = DefaultDBPath()
+	}
+	if cfg.Server.ManifestPath == "" {
+		cfg.Server.ManifestPath = DefaultManifestPath(cfg.Server.DBPath)
 	}
 	for i := range cfg.Servers {
 		s := &cfg.Servers[i]
@@ -170,8 +187,9 @@ func LoadOrInit(path string) (*Config, error) {
 	}
 	cfg = &Config{
 		Server: ServerConfig{
-			SocketPath: DefaultSocketPath(),
-			DBPath:     DefaultDBPath(),
+			SocketPath:   DefaultSocketPath(),
+			DBPath:       DefaultDBPath(),
+			ManifestPath: DefaultManifestPath(DefaultDBPath()),
 		},
 		Servers: []MCPServer{},
 	}

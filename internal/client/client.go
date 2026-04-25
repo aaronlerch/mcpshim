@@ -285,6 +285,29 @@ func Run(binaryName string, argv []string) int {
 			return 1
 		}
 		return runLoginLocal(server, manual)
+	case "manifest":
+		fs := flag.NewFlagSet("manifest", flag.ContinueOnError)
+		var pathOnly bool
+		fs.BoolVar(&pathOnly, "path", false, "print the manifest file path instead of its content")
+		_ = fs.Parse(rest)
+		resp, err := call(protocol.Request{Action: "manifest"}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if !resp.OK {
+			fmt.Fprintln(os.Stderr, resp.Error)
+			return 1
+		}
+		if jsonOut {
+			return printResponse(resp, jsonOut)
+		}
+		if pathOnly {
+			fmt.Println(resp.ManifestPath)
+			return 0
+		}
+		fmt.Print(resp.ManifestContent)
+		return 0
 	case "logout":
 		fs := flag.NewFlagSet("logout", flag.ContinueOnError)
 		var server string
@@ -1383,6 +1406,7 @@ func usage() {
 	fmt.Println("  remove --name x")
 	fmt.Println("  reload")
 	fmt.Println("  refresh [--server name]")
+	fmt.Println("  manifest [--path]")
 	fmt.Println("  validate [--config path]")
 	fmt.Println("  login --server name [--manual]")
 	fmt.Println("  logout --server name [--full]")

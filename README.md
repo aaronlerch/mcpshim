@@ -145,6 +145,7 @@ All paths follow XDG defaults where applicable.
 | `mcpshim prompts [--server s]`                        | List MCP prompts                 |
 | `mcpshim get-prompt --server s --name p [--arg K=V]`  | Render a prompt with arguments   |
 | `mcpshim refresh [--server s]`                        | Force-refresh tools/state now    |
+| `mcpshim manifest [--path]`                           | Print live markdown manifest (or its file path) |
 | `mcpshim script [--install] [--dir ~/.local/bin]`     | Generate/install alias wrappers  |
 
 ### Register MCP servers
@@ -192,6 +193,19 @@ Two modes are supported:
 - **URL** — the server sends a URL; the user is asked `[y/N/cancel]`. Anything that isn't `y`/`yes` declines.
 
 When stdin is not a TTY (programmatic invocation), elicitation is automatically declined so calls don't hang waiting for input.
+
+---
+
+## Live Manifest
+
+The daemon writes a markdown manifest of every registered server and its currently-cached tools to `${XDG_DATA_HOME:-~/.local/share}/mcpshim/manifest.md` (override via `server.manifest_path` in config). It regenerates automatically after every successful refresh and after every config-mutating action (`add`, `remove`, `set auth`, `reload`, `refresh`).
+
+Point an AI agent at this file at session start and it gets the full server-and-tool inventory up front — no discovery round-trips through `servers` / `tools` / `inspect`. Auth-required servers are flagged with the exact `mcpshim login` command needed to recover; failed servers surface their last error inline.
+
+```bash
+mcpshim manifest          # print current manifest
+mcpshim manifest --path   # just the on-disk path
+```
 
 ---
 
