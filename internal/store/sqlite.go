@@ -256,6 +256,26 @@ ON CONFLICT(server) DO UPDATE SET client_id=excluded.client_id, client_secret=ex
 	return nil
 }
 
+// DeleteOAuthToken removes any persisted access/refresh token for server.
+// Returns no error when no row exists.
+func (s *Store) DeleteOAuthToken(server string) error {
+	_, err := s.db.Exec(`DELETE FROM oauth_tokens WHERE server = ?`, server)
+	if err != nil {
+		return fmt.Errorf("delete oauth token: %w", err)
+	}
+	return nil
+}
+
+// DeleteOAuthClient removes persisted dynamic-registration client credentials
+// for server. Returns no error when no row exists.
+func (s *Store) DeleteOAuthClient(server string) error {
+	_, err := s.db.Exec(`DELETE FROM oauth_clients WHERE server = ?`, server)
+	if err != nil {
+		return fmt.Errorf("delete oauth client: %w", err)
+	}
+	return nil
+}
+
 // HasOAuthState returns true if this server has stored OAuth tokens or client credentials.
 func (s *Store) HasOAuthState(server string) bool {
 	var n int

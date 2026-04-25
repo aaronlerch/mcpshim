@@ -1,11 +1,13 @@
 package server
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mcpshim/mcpshim/internal/config"
 	"github.com/mcpshim/mcpshim/internal/protocol"
+	"github.com/mcpshim/mcpshim/internal/store"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -107,5 +109,90 @@ func TestHandleRefreshUnknownServer(t *testing.T) {
 	}
 	if !strings.Contains(resp.Error, "unknown server") {
 		t.Fatalf("error = %q", resp.Error)
+	}
+}
+
+// newTestServerWithStore wires a real (empty) SQLite store for tests that
+// need the OAuth tables.
+func newTestServerWithStore(t *testing.T, servers []config.MCPServer) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = dbStore.Close() })
+	cfg := &config.Config{
+		Server:  config.ServerConfig{SocketPath: filepath.Join(dir, "sock"), DBPath: filepath.Join(dir, "test.db")},
+		Servers: servers,
+	}
+	srv := New(filepath.Join(dir, "config.yaml"), cfg)
+	srv.store = dbStore
+	return srv
+}
+
+func TestHandleLogoutUnknownServer(t *testing.T) {
+	s := newTestServerWithStore(t, nil)
+	resp := s.handle(protocol.Request{Action: "logout", Server: "ghost"})
+	if resp.OK || !strings.Contains(resp.Error, "unknown server") {
+		t.Fatalf("error = %q", resp.Error)
+	}
+}
+
+func TestHandleLogoutClearsToken(t *testing.T) {
+	cfg := []config.MCPServer{{Name: "demo", Transport: "http", URL: "http://x"}}
+	s := newTestServerWithStore(t, cfg)
+	if err := s.store.SaveOAuthClient("demo", "id-1", "secret-1"); err != nil {
+		t.Fatalf("SaveOAuthClient: %v", err)
+	}
+
+	resp := s.handle(protocol.Request{Action: "logout", Server: "demo"})
+	if !resp.OK {
+		t.Fatalf("logout failed: %q", resp.Error)
+	}
+
+	// Client creds should still exist (no --full).
+	c, _ := s.store.GetOAuthClient("demo")
+	if c == nil || c.ClientID != "id-1" {
+		t.Fatalf("client creds should be preserved without --full, got %+v", c)
+	}
+}
+
+func TestHandleLogoutFullClearsBoth(t *testing.T) {
+	cfg := []config.MCPServer{{Name: "demo", Transport: "http", URL: "http://x"}}
+	s := newTestServerWithStore(t, cfg)
+	if err := s.store.SaveOAuthClient("demo", "id-1", "secret-1"); err != nil {
+		t.Fatalf("SaveOAuthClient: %v", err)
+	}
+
+	resp := s.handle(protocol.Request{Action: "logout", Server: "demo", Full: true})
+	if !resp.OK {
+		t.Fatalf("logout --full failed: %q", resp.Error)
+	}
+
+	c, _ := s.store.GetOAuthClient("demo")
+	if c != nil {
+		t.Fatalf("client creds should be cleared with --full, got %+v", c)
+	}
+}
+
+func TestHandleSetAuthSavesClientCredentials(t *testing.T) {
+	cfg := []config.MCPServer{{Name: "demo", Transport: "http", URL: "http://x"}}
+	s := newTestServerWithStore(t, cfg)
+	resp := s.handle(protocol.Request{
+		Action:       "set_auth",
+		Name:         "demo",
+		ClientID:     "preconfig-id",
+		ClientSecret: "preconfig-secret",
+	})
+	if !resp.OK {
+		t.Fatalf("set_auth failed: %q", resp.Error)
+	}
+	c, err := s.store.GetOAuthClient("demo")
+	if err != nil {
+		t.Fatalf("GetOAuthClient: %v", err)
+	}
+	if c == nil || c.ClientID != "preconfig-id" || c.ClientSecret != "preconfig-secret" {
+		t.Fatalf("client creds not stored: %+v", c)
 	}
 }

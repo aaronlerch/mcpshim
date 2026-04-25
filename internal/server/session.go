@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/mcpshim/mcpshim/internal/config"
 	"github.com/mcpshim/mcpshim/internal/protocol"
 )
 
@@ -59,4 +60,17 @@ func (s *session) markFinished() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.finished = true
+}
+
+// serverConfigured returns true if cfg lists a server matching nameOrAlias.
+func serverConfigured(cfg *config.Config, nameOrAlias string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, s := range cfg.Servers {
+		if s.Name == nameOrAlias || s.Alias == nameOrAlias {
+			return true
+		}
+	}
+	return false
 }
