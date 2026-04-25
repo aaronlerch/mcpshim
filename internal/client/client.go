@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -167,7 +168,7 @@ func Run(binaryName string, argv []string) int {
 		return runCall(rest, socketPath, jsonOut)
 	case "add":
 		fs := flag.NewFlagSet("add", flag.ContinueOnError)
-		var name, alias, url, transport, command, headersHelper string
+		var name, alias, url, transport, command, headersHelper, clientID, clientSecret string
 		var headers headerArgs
 		var cmdArgs stringSliceArgs
 		var env headerArgs
@@ -180,6 +181,8 @@ func Run(binaryName string, argv []string) int {
 		fs.StringVar(&command, "command", "", "executable to launch (stdio only)")
 		fs.Var(&cmdArgs, "arg", "command argument (repeatable, stdio only)")
 		fs.Var(&env, "env", "environment variable key=value (repeatable, stdio only)")
+		fs.StringVar(&clientID, "client-id", "", "pre-configured OAuth client_id (skips dynamic registration)")
+		fs.StringVar(&clientSecret, "client-secret", "", "pre-configured OAuth client_secret")
 		_ = fs.Parse(rest)
 		headersMap := map[string]string(headers)
 		envMap := map[string]string(env)
@@ -194,6 +197,8 @@ func Run(binaryName string, argv []string) int {
 			Command:       command,
 			CmdArgs:       []string(cmdArgs),
 			Env:           envMap,
+			ClientID:      clientID,
+			ClientSecret:  clientSecret,
 		}, socketPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -280,6 +285,29 @@ func Run(binaryName string, argv []string) int {
 			return 1
 		}
 		return runLoginLocal(server, manual)
+	case "logout":
+		fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+		var server string
+		var full bool
+		fs.StringVar(&server, "server", "", "server name or alias")
+		fs.BoolVar(&full, "full", false, "also delete persisted client credentials")
+		_ = fs.Parse(rest)
+		if server == "" {
+			pos := fs.Args()
+			if len(pos) > 0 {
+				server = pos[0]
+			}
+		}
+		if server == "" {
+			fmt.Fprintln(os.Stderr, "usage: mcpshim logout --server <name> [--full]")
+			return 1
+		}
+		resp, err := call(protocol.Request{Action: "logout", Server: server, Full: full}, socketPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return printResponse(resp, jsonOut)
 	case "resources":
 		fs := flag.NewFlagSet("resources", flag.ContinueOnError)
 		var server string
@@ -433,17 +461,19 @@ func runSetCommand(args []string, socket string, jsonOut bool) int {
 	}
 
 	fs := flag.NewFlagSet("set auth", flag.ContinueOnError)
-	var name string
+	var name, clientID, clientSecret string
 	var headers headerArgs
 	fs.StringVar(&name, "server", "", "server name")
 	fs.Var(&headers, "header", "request header key=value (repeatable)")
+	fs.StringVar(&clientID, "client-id", "", "pre-configured OAuth client_id")
+	fs.StringVar(&clientSecret, "client-secret", "", "pre-configured OAuth client_secret")
 	_ = fs.Parse(args[1:])
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "usage: mcpshim set auth --server <name> --header K=V")
+		fmt.Fprintln(os.Stderr, "usage: mcpshim set auth --server <name> [--header K=V] [--client-id X --client-secret Y]")
 		return 1
 	}
 	headersMap := map[string]string(headers)
-	resp, err := call(protocol.Request{Action: "set_auth", Name: name, Headers: headersMap}, socket)
+	resp, err := call(protocol.Request{Action: "set_auth", Name: name, Headers: headersMap, ClientID: clientID, ClientSecret: clientSecret}, socket)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -1008,18 +1038,101 @@ func call(req protocol.Request, socketPath string) (*protocol.Response, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(70 * time.Second))
+	// Long deadline tolerates user input mid-call for elicitation prompts.
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Minute))
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(req); err != nil {
 		return nil, err
 	}
-	var resp protocol.Response
-	if err := dec.Decode(&resp); err != nil {
-		return nil, err
+	for {
+		var resp protocol.Response
+		if err := dec.Decode(&resp); err != nil {
+			return nil, err
+		}
+		if resp.Elicitation == nil {
+			return &resp, nil
+		}
+		answer := promptElicitation(resp.Elicitation)
+		reply := protocol.Request{Action: "elicitation_response", ElicitationAnswer: answer}
+		if err := enc.Encode(reply); err != nil {
+			return nil, err
+		}
 	}
-	return &resp, nil
+}
+
+// promptElicitation surfaces an upstream MCP server's elicitation request to
+// the user. In non-interactive contexts (no TTY on stdin) it auto-declines so
+// programmatic invocations don't hang.
+func promptElicitation(req *protocol.ElicitationRequest) *protocol.ElicitationAnswer {
+	if !isStdinTerminal() {
+		fmt.Fprintf(os.Stderr, "[mcpshim] elicitation declined automatically (non-interactive): %s\n", req.Message)
+		return &protocol.ElicitationAnswer{Action: "decline"}
+	}
+
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "[mcpshim] %s asks:\n", req.Server)
+	fmt.Fprintf(os.Stderr, "  %s\n", req.Message)
+
+	mode := req.Mode
+	if mode == "" {
+		mode = "form"
+	}
+
+	switch mode {
+	case "url":
+		if req.URL != "" {
+			fmt.Fprintf(os.Stderr, "  URL: %s\n", req.URL)
+		}
+		fmt.Fprint(os.Stderr, "  Visit URL and confirm? [y/N/cancel]: ")
+		line := readStdinLine()
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			return &protocol.ElicitationAnswer{Action: "accept"}
+		case "c", "cancel":
+			return &protocol.ElicitationAnswer{Action: "cancel"}
+		default:
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		}
+	default: // form
+		if req.RequestedSchema != nil {
+			schemaJSON, _ := json.MarshalIndent(req.RequestedSchema, "  ", "  ")
+			fmt.Fprintf(os.Stderr, "  Expected JSON schema:\n  %s\n", string(schemaJSON))
+		}
+		fmt.Fprint(os.Stderr, "  Reply with JSON object (or 'decline'/'cancel'): ")
+		line := readStdinLine()
+		trimmed := strings.TrimSpace(line)
+		switch strings.ToLower(trimmed) {
+		case "decline", "":
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		case "cancel":
+			return &protocol.ElicitationAnswer{Action: "cancel"}
+		}
+		var content any
+		if err := json.Unmarshal([]byte(trimmed), &content); err != nil {
+			fmt.Fprintf(os.Stderr, "  invalid JSON (%v); declining\n", err)
+			return &protocol.ElicitationAnswer{Action: "decline"}
+		}
+		return &protocol.ElicitationAnswer{Action: "accept", Content: content}
+	}
+}
+
+func readStdinLine() string {
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	return line
+}
+
+func isStdinTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func fallbackSocketPath(requested string) string {
@@ -1265,12 +1378,14 @@ func usage() {
 	fmt.Println("       use '--' before tool args to pass reserved names (e.g. --help, --server)")
 	fmt.Println("  add --name x --url http://... [--transport http|sse] [--alias short] [--header K=V] [--headers-helper 'cmd']")
 	fmt.Println("  add --name x --transport stdio --command bin [--arg a] [--env K=V]")
-	fmt.Println("  set auth --server x [--header K=V]")
+	fmt.Println("       optional: [--client-id X --client-secret Y] for pre-configured OAuth")
+	fmt.Println("  set auth --server x [--header K=V] [--client-id X --client-secret Y]")
 	fmt.Println("  remove --name x")
 	fmt.Println("  reload")
 	fmt.Println("  refresh [--server name]")
 	fmt.Println("  validate [--config path]")
 	fmt.Println("  login --server name [--manual]")
+	fmt.Println("  logout --server name [--full]")
 	fmt.Println("  status")
 	fmt.Println("  history [--server name] [--tool name] [--limit 50]")
 	fmt.Println("  resources [--server name]")

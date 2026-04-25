@@ -77,7 +77,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		oauthCfg.ClientSecret = storedClient.ClientSecret
 	}
 
-	oauthClient, closeFn, err := newOAuthClient(s, oauthCfg)
+	oauthClient, closeFn, err := newOAuthClient(ctx, s, oauthCfg)
 	if err != nil {
 		log.Printf("[oauth:%s] failed to create OAuth client: %v", s.Name, err)
 		var zero T
@@ -152,7 +152,7 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		oauthCfg.ClientSecret = storedClient.ClientSecret
 	}
 
-	oauthClient, closeFn, err := newOAuthClient(s, oauthCfg)
+	oauthClient, closeFn, err := newOAuthClient(ctx, s, oauthCfg)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 }
 
 func runOperation[T any](ctx context.Context, s config.MCPServer, operation func(compatibleClient) (T, error)) (T, error) {
-	client, closeFn, err := newClient(s)
+	client, closeFn, err := newClient(ctx, s)
 	if err != nil {
 		var zero T
 		return zero, err
@@ -392,34 +392,15 @@ func (s *oauthCallbackServer) wait(ctx context.Context) (map[string]string, erro
 	}
 }
 
-func newOAuthClient(s config.MCPServer, oauthConfig mcpclient.OAuthConfig) (compatibleClient, func(), error) {
+func newOAuthClient(ctx context.Context, s config.MCPServer, oauthConfig mcpclient.OAuthConfig) (compatibleClient, func(), error) {
 	if s.Transport == "stdio" {
 		return nil, nil, fmt.Errorf("oauth client is not supported for stdio transport")
 	}
-	headers, err := resolveHeaders(s)
+	trans, err := buildTransport(s, &oauthConfig)
 	if err != nil {
 		return nil, nil, err
 	}
-	if s.Transport == "sse" {
-		opts := []transport.ClientOption{}
-		if len(headers) > 0 {
-			opts = append(opts, transport.WithHeaders(headers))
-		}
-		cli, err := mcpclient.NewOAuthSSEClient(s.URL, oauthConfig, opts...)
-		if err != nil {
-			return nil, nil, err
-		}
-		return cli, func() { _ = cli.Close() }, nil
-	}
-
-	opts := []transport.StreamableHTTPCOption{}
-	if len(headers) > 0 {
-		opts = append(opts, transport.WithHTTPHeaders(headers))
-	}
-	cli, err := mcpclient.NewOAuthStreamableHttpClient(s.URL, oauthConfig, opts...)
-	if err != nil {
-		return nil, nil, err
-	}
+	cli := mcpclient.NewClient(trans, clientOptionsFor(ctx, s)...)
 	return cli, func() { _ = cli.Close() }, nil
 }
 

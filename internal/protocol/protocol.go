@@ -3,22 +3,46 @@ package protocol
 import "time"
 
 type Request struct {
-	Action        string                 `json:"action"`
-	Name          string                 `json:"name,omitempty"`
-	Server        string                 `json:"server,omitempty"`
-	Tool          string                 `json:"tool,omitempty"`
-	Limit         int                    `json:"limit,omitempty"`
-	Alias         string                 `json:"alias,omitempty"`
-	URL           string                 `json:"url,omitempty"`
-	Transport     string                 `json:"transport,omitempty"`
-	Headers       map[string]string      `json:"headers,omitempty"`
-	HeadersHelper string                 `json:"headers_helper,omitempty"`
-	Command       string                 `json:"command,omitempty"`
-	CmdArgs       []string               `json:"cmd_args,omitempty"`
-	Env           map[string]string      `json:"env,omitempty"`
-	Args          map[string]interface{} `json:"args,omitempty"`
-	URI           string                 `json:"uri,omitempty"`
-	PromptArgs    map[string]string      `json:"prompt_args,omitempty"`
+	Action            string                 `json:"action"`
+	Name              string                 `json:"name,omitempty"`
+	Server            string                 `json:"server,omitempty"`
+	Tool              string                 `json:"tool,omitempty"`
+	Limit             int                    `json:"limit,omitempty"`
+	Alias             string                 `json:"alias,omitempty"`
+	URL               string                 `json:"url,omitempty"`
+	Transport         string                 `json:"transport,omitempty"`
+	Headers           map[string]string      `json:"headers,omitempty"`
+	HeadersHelper     string                 `json:"headers_helper,omitempty"`
+	Command           string                 `json:"command,omitempty"`
+	CmdArgs           []string               `json:"cmd_args,omitempty"`
+	Env               map[string]string      `json:"env,omitempty"`
+	Args              map[string]interface{} `json:"args,omitempty"`
+	URI               string                 `json:"uri,omitempty"`
+	PromptArgs        map[string]string      `json:"prompt_args,omitempty"`
+	ElicitationAnswer *ElicitationAnswer     `json:"elicitation_answer,omitempty"`
+	ClientID          string                 `json:"client_id,omitempty"`
+	ClientSecret      string                 `json:"client_secret,omitempty"`
+	Full              bool                   `json:"full,omitempty"`
+}
+
+// ElicitationRequest is sent from the daemon to the CLI mid-call when the
+// upstream MCP server invokes elicitation/create. The CLI prompts the user
+// and replies with `Request{Action: "elicitation_response", ElicitationAnswer: ...}`.
+type ElicitationRequest struct {
+	Server          string `json:"server"`
+	Mode            string `json:"mode,omitempty"` // "form" (default) or "url"
+	Message         string `json:"message"`
+	RequestedSchema any    `json:"requested_schema,omitempty"`
+	URL             string `json:"url,omitempty"`
+	ElicitationID   string `json:"elicitation_id,omitempty"`
+}
+
+// ElicitationAnswer is the CLI's response. Action is one of "accept",
+// "decline", or "cancel". Content carries form-mode data and is omitted
+// for decline/cancel.
+type ElicitationAnswer struct {
+	Action  string `json:"action"`
+	Content any    `json:"content,omitempty"`
 }
 
 type ServerInfo struct {
@@ -121,17 +145,18 @@ type HistoryItem struct {
 }
 
 type Response struct {
-	OK               bool              `json:"ok"`
-	Error            string            `json:"error,omitempty"`
-	Status           *Status           `json:"status,omitempty"`
-	Servers          []ServerInfo      `json:"servers,omitempty"`
-	Tools            []ToolInfo        `json:"tools,omitempty"`
-	History          []HistoryItem     `json:"history,omitempty"`
-	ToolDetail       *ToolDetail       `json:"tool_detail,omitempty"`
-	Resources        []ResourceInfo    `json:"resources,omitempty"`
-	ResourceContents []ResourceContent `json:"resource_contents,omitempty"`
-	Prompts          []PromptInfo      `json:"prompts,omitempty"`
-	PromptResult     *PromptResult     `json:"prompt_result,omitempty"`
-	Result           interface{}       `json:"result,omitempty"`
-	Text             string            `json:"text,omitempty"`
+	OK               bool                `json:"ok"`
+	Error            string              `json:"error,omitempty"`
+	Status           *Status             `json:"status,omitempty"`
+	Servers          []ServerInfo        `json:"servers,omitempty"`
+	Tools            []ToolInfo          `json:"tools,omitempty"`
+	History          []HistoryItem       `json:"history,omitempty"`
+	ToolDetail       *ToolDetail         `json:"tool_detail,omitempty"`
+	Resources        []ResourceInfo      `json:"resources,omitempty"`
+	ResourceContents []ResourceContent   `json:"resource_contents,omitempty"`
+	Prompts          []PromptInfo        `json:"prompts,omitempty"`
+	PromptResult     *PromptResult       `json:"prompt_result,omitempty"`
+	Result           interface{}         `json:"result,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	Elicitation      *ElicitationRequest `json:"elicitation,omitempty"`
 }

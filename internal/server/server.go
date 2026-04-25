@@ -122,12 +122,21 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = w.Flush()
 		return
 	}
-	resp := s.handle(req)
+	sess := newSession(enc, dec, func() { _ = w.Flush() })
+	ctx := mcp.WithSession(context.Background(), sess)
+	resp := s.handleCtx(ctx, req)
+	sess.markFinished()
 	_ = enc.Encode(resp)
 	_ = w.Flush()
 }
 
+// handle preserves the existing zero-context entry point for tests and
+// internal callers that don't need elicitation.
 func (s *Server) handle(req protocol.Request) protocol.Response {
+	return s.handleCtx(context.Background(), req)
+}
+
+func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.Response {
 	switch req.Action {
 	case "status":
 		return protocol.Response{OK: true, Status: &protocol.Status{
@@ -139,7 +148,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 	case "servers":
 		return protocol.Response{OK: true, Servers: s.registry.Servers()}
 	case "tools":
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		items, err := s.registry.ListTools(ctx, req.Server)
 		if err != nil {
@@ -160,7 +169,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		if req.Server == "" || req.Tool == "" {
 			return protocol.Response{OK: false, Error: "server and tool are required"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		detail, err := s.registry.InspectTool(ctx, req.Server, req.Tool)
 		if err != nil {
@@ -172,7 +181,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 			return protocol.Response{OK: false, Error: "server and tool are required"}
 		}
 		started := time.Now().UTC()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		result, err := s.registry.Call(ctx, req.Server, req.Tool, req.Args)
 		historyItem := protocol.HistoryItem{
@@ -209,6 +218,11 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		config.UpsertServer(s.cfg, item)
 		if err := config.Save(s.configPath, s.cfg); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		if req.ClientID != "" && s.store != nil {
+			if err := s.store.SaveOAuthClient(req.Name, req.ClientID, req.ClientSecret); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
 		}
 		s.registry.UpdateConfig(s.cfg)
 		_ = s.registry.Refresh(context.Background())
@@ -249,10 +263,15 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		if err := config.Save(s.configPath, s.cfg); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
 		}
+		if req.ClientID != "" && s.store != nil {
+			if err := s.store.SaveOAuthClient(req.Name, req.ClientID, req.ClientSecret); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
+		}
 		s.registry.UpdateConfig(s.cfg)
 		return protocol.Response{OK: true, Text: "updated authentication"}
 	case "refresh":
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		if req.Server != "" {
 			if _, err := s.registry.RefreshServer(ctx, req.Server); err != nil {
@@ -283,7 +302,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		_ = s.registry.Refresh(context.Background())
 		return protocol.Response{OK: true, Text: "reloaded config"}
 	case "resources":
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		items, err := s.registry.ListResources(ctx, req.Server)
 		if err != nil {
@@ -294,7 +313,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		if req.Server == "" || req.URI == "" {
 			return protocol.Response{OK: false, Error: "server and uri are required"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		contents, err := s.registry.ReadResource(ctx, req.Server, req.URI)
 		if err != nil {
@@ -302,7 +321,7 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		}
 		return protocol.Response{OK: true, ResourceContents: contents}
 	case "prompts":
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		items, err := s.registry.ListPrompts(ctx, req.Server)
 		if err != nil {
@@ -313,18 +332,39 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 		if req.Server == "" || req.Name == "" {
 			return protocol.Response{OK: false, Error: "server and name are required"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		result, err := s.registry.GetPrompt(ctx, req.Server, req.Name, req.PromptArgs)
 		if err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
 		}
 		return protocol.Response{OK: true, PromptResult: result}
+	case "logout":
+		if req.Server == "" {
+			return protocol.Response{OK: false, Error: "server is required"}
+		}
+		if !serverConfigured(s.cfg, req.Server) {
+			return protocol.Response{OK: false, Error: fmt.Sprintf("unknown server %q", req.Server)}
+		}
+		if s.store == nil {
+			return protocol.Response{OK: false, Error: "store not initialized"}
+		}
+		if err := s.store.DeleteOAuthToken(req.Server); err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+		text := fmt.Sprintf("cleared oauth token for %s", req.Server)
+		if req.Full {
+			if err := s.store.DeleteOAuthClient(req.Server); err != nil {
+				return protocol.Response{OK: false, Error: err.Error()}
+			}
+			text = fmt.Sprintf("cleared oauth token and client credentials for %s", req.Server)
+		}
+		return protocol.Response{OK: true, Text: text}
 	case "login":
 		if req.Server == "" {
 			return protocol.Response{OK: false, Error: "server is required"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 		defer cancel()
 		if err := s.registry.Login(ctx, req.Server, false); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}

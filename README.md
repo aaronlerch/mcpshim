@@ -138,6 +138,7 @@ All paths follow XDG defaults where applicable.
 | `mcpshim reload`                                      | Reload daemon configuration      |
 | `mcpshim validate [--config path]`                    | Validate config file             |
 | `mcpshim login --server s [--manual]`                 | Complete OAuth login flow        |
+| `mcpshim logout --server s [--full]`                  | Clear stored OAuth token (--full also clears client creds) |
 | `mcpshim history [--server s] [--tool t] [--limit n]` | Show persisted call history      |
 | `mcpshim resources [--server s]`                      | List MCP resources               |
 | `mcpshim read --server s --uri 'protocol://path'`     | Read a single resource           |
@@ -181,6 +182,19 @@ mcpshim call --server notion --tool search --query "projects" --limit 10 --archi
 
 ---
 
+## Elicitation
+
+When an upstream MCP server invokes `elicitation/create` mid-call (e.g. "are you sure you want to delete this?"), the daemon relays the question to the calling `mcpshim` process, which prompts the user on stderr and sends the answer back over the same socket connection.
+
+Two modes are supported:
+
+- **Form** — the server sends a JSON schema; the user replies with a JSON object on one line, or types `decline`/`cancel`. Invalid JSON automatically declines.
+- **URL** — the server sends a URL; the user is asked `[y/N/cancel]`. Anything that isn't `y`/`yes` declines.
+
+When stdin is not a TTY (programmatic invocation), elicitation is automatically declined so calls don't hang waiting for input.
+
+---
+
 ## Server Status & Resilience
 
 Every registered server carries a status that you can see via `mcpshim servers`:
@@ -212,6 +226,22 @@ You can also pre-authorize:
 ```bash
 mcpshim login --server notion
 mcpshim login --server notion --manual
+```
+
+If your MCP server requires pre-registered OAuth clients (no dynamic registration), pass them at registration time or via `set auth`:
+
+```bash
+mcpshim add --name acme --transport http --url https://mcp.acme.com/mcp \
+  --client-id $ACME_CLIENT_ID --client-secret $ACME_CLIENT_SECRET
+# or for an already-registered server:
+mcpshim set auth --server acme --client-id $ACME_CLIENT_ID --client-secret $ACME_CLIENT_SECRET
+```
+
+To revoke a stored token (forcing re-auth on next call):
+
+```bash
+mcpshim logout --server notion          # token only
+mcpshim logout --server notion --full   # token + client credentials
 ```
 
 `--manual` supports cross-device auth by printing a URL and accepting pasted callback URL/code.
