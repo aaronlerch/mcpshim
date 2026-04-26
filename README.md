@@ -122,6 +122,37 @@ All paths follow XDG defaults where applicable.
 | `--debug`   | Enable debug logging      |
 | `--version` | Print version and exit    |
 
+### Autostart (Linux, systemd user service)
+
+A user-level systemd unit is provided at `configs/mcpshim.service`. It runs `mcpshimd` as your user, restarts on failure, and logs to journald. It assumes the binary is at `~/.local/bin/mcpshimd` (adjust `ExecStart=` if you installed elsewhere).
+
+```bash
+# Install the unit
+mkdir -p ~/.config/systemd/user
+cp configs/mcpshim.service ~/.config/systemd/user/
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now mcpshim.service
+
+# Verify
+systemctl --user status mcpshim.service
+mcpshim servers
+journalctl --user -u mcpshim.service -f   # tail logs
+```
+
+For the service to start at boot (before you log in), enable lingering once:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+The daemon already removes any stale `mcpshim.sock` before binding, so no `ExecStartPre` cleanup is needed.
+
+### Autostart (macOS, launchd)
+
+Not bundled — file an issue or PR if you want a `launchd` plist. A minimal plist runs `~/.local/bin/mcpshimd` with `RunAtLoad=true` and `KeepAlive=true`, loaded via `launchctl load ~/Library/LaunchAgents/dev.mcpshim.daemon.plist`.
+
 ---
 
 ## Core Commands

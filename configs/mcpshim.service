@@ -1,0 +1,19 @@
+[Unit]
+Description=mcpshim daemon (MCP server proxy)
+Documentation=https://github.com/aaronlerch/mcpshim
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mcpshimd
+Restart=on-failure
+RestartSec=3s
+StartLimitIntervalSec=30
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_RUNTIME_DIR=%t
+
+[Install]
+WantedBy=default.target
