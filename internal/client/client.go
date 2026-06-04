@@ -1037,8 +1037,23 @@ func parseDynamicArgs(args []string) map[string]interface{} {
 }
 
 func normalize(v string) interface{} {
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
+	// JSON arrays/objects: parse so structured params survive (e.g. add-tasks
+	// `tasks`, complete-tasks `ids`). Without this they reach the upstream tool
+	// as a raw string and fail schema validation ("expected array, received string").
+	if trimmed := strings.TrimSpace(v); len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			return parsed
+		}
+	}
+	// Booleans: only the explicit literals. strconv.ParseBool also accepts
+	// "1"/"0"/"t"/"f", which would wrongly turn a numeric arg like --limit 1
+	// into a boolean ("expected number, received boolean").
+	if strings.EqualFold(v, "true") {
+		return true
+	}
+	if strings.EqualFold(v, "false") {
+		return false
 	}
 	if i, err := strconv.ParseInt(v, 10, 64); err == nil {
 		return i

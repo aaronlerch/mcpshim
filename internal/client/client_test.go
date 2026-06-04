@@ -1,10 +1,59 @@
 package client
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/mcpshim/mcpshim/internal/protocol"
 )
+
+func TestNormalize(t *testing.T) {
+	cases := []struct {
+		in   string
+		want interface{}
+	}{
+		{"true", true},
+		{"false", false},
+		{"TRUE", true},
+		{"1", int64(1)},           // numeric, not boolean
+		{"0", int64(0)},           // numeric, not boolean
+		{"42", int64(42)},
+		{"-5", int64(-5)},
+		{"3.14", 3.14},
+		{"hello", "hello"},
+		{"t", "t"},                // not a bool literal -> string
+		{`["a","b"]`, []interface{}{"a", "b"}},
+		{`[1,2]`, []interface{}{float64(1), float64(2)}},
+		{`{"k":"v"}`, map[string]interface{}{"k": "v"}},
+		{"[not json", "[not json"}, // invalid JSON -> string
+	}
+	for _, c := range cases {
+		got := normalize(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("normalize(%q) = %#v (%T), want %#v (%T)", c.in, got, got, c.want, c.want)
+		}
+	}
+}
+
+func TestParseDynamicArgsStructured(t *testing.T) {
+	args := []string{
+		"--tasks", `[{"content":"x","priority":4}]`,
+		"--limit", "1",
+		"--flag",
+	}
+	out := parseDynamicArgs(args)
+
+	tasks, ok := out["tasks"].([]interface{})
+	if !ok || len(tasks) != 1 {
+		t.Fatalf("tasks not parsed as array: %#v", out["tasks"])
+	}
+	if out["limit"] != int64(1) {
+		t.Fatalf("limit = %#v, want int64(1)", out["limit"])
+	}
+	if out["flag"] != true {
+		t.Fatalf("valueless flag = %#v, want true", out["flag"])
+	}
+}
 
 func TestSanitizeAliasName(t *testing.T) {
 	cases := map[string]string{
