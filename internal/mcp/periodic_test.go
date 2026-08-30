@@ -99,6 +99,29 @@ func TestRefreshStillAttemptsAuthRequired(t *testing.T) {
 	}
 }
 
+// Login probes the server with RefreshServer once the browser flow succeeds,
+// so RefreshServer -- like Refresh -- must ignore the periodic skip. If it
+// honored it, a successful login could never clear auth_required and the
+// server would stay parked forever while looking like it had just logged in.
+func TestRefreshServerStillAttemptsAuthRequired(t *testing.T) {
+	cfg := &config.Config{Servers: []config.MCPServer{
+		{Name: "stuck", Transport: "http", URL: "http://127.0.0.1:1"},
+	}}
+	r := NewRegistryWithBackoff(cfg, nil, []time.Duration{0})
+
+	stuck := r.stateFor("stuck")
+	stuck.recordFailure(errors.New("oauth needed"), true)
+	before := lastAttempt(stuck)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = r.RefreshServer(ctx, "stuck")
+
+	if got := lastAttempt(stuck); got.Equal(before) {
+		t.Error("RefreshServer must attempt an auth_required server; Login relies on it to clear the parked state")
+	}
+}
+
 func TestHealthCountsAndNames(t *testing.T) {
 	cfg := &config.Config{Servers: []config.MCPServer{
 		{Name: "ok", Transport: "http", URL: "http://127.0.0.1:1"},

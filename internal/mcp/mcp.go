@@ -619,7 +619,23 @@ func (r *Registry) Login(ctx context.Context, server string, manual bool) error 
 		return fmt.Errorf("unknown server %q", server)
 	}
 
-	return runOAuthLogin(ctx, s, r.store, manual)
+	if err := runOAuthLogin(ctx, s, r.store, manual); err != nil {
+		return err
+	}
+
+	// Persisting a token is not the same as clearing the failure state, and the
+	// difference became load-bearing once RefreshPeriodic started skipping
+	// auth_required servers: nothing else would ever re-probe this one, so a
+	// login that plainly succeeded would leave the server parked until an
+	// explicit refresh or a daemon restart. Probe it here so the state machine
+	// catches up with reality.
+	//
+	// The refresh result is deliberately discarded. The login DID succeed; if
+	// the probe then fails for some unrelated reason the server lands in
+	// degraded/failed and the ticker picks it up again, which is the correct
+	// outcome and not a reason to report the login as failed.
+	_, _ = r.refreshServer(ctx, s)
+	return nil
 }
 
 func fetchToolsForServer(ctx context.Context, s config.MCPServer, dbStore *store.Store, interactive bool) ([]protocol.ToolInfo, error) {

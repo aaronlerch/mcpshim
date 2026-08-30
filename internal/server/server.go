@@ -21,6 +21,15 @@ import (
 	"github.com/mcpshim/mcpshim/internal/store"
 )
 
+const (
+	// How often the daemon re-probes servers in the background.
+	refreshInterval = 2 * time.Minute
+	// Ceiling on one whole refresh cycle across every configured server. Kept
+	// under refreshInterval so a wedged cycle cannot outlive the tick that
+	// started it and pile goroutines up behind a dead upstream.
+	refreshTimeout = 90 * time.Second
+)
+
 type Server struct {
 	configPath string
 	cfg        *config.Config
@@ -75,9 +84,24 @@ func (s *Server) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	_ = s.registry.Refresh(context.Background())
-	s.writeManifest()
-	ticker := time.NewTicker(2 * time.Minute)
+	// Warm the cache off the critical path, with a deadline. This used to run
+	// inline, right here, before the accept loop below -- so a single slow or
+	// unresponsive upstream made the ENTIRE daemon unreachable: the socket
+	// existed (it is created above) but nothing was accepting on it, and every
+	// CLI call blocked forever with no error. Observed in the wild as an
+	// 11-minute hang on one server that never answered, with the other seven
+	// never probed at all.
+	//
+	// Both refresh paths take a bounded context for the same reason. The
+	// unbounded context.Background() they used before had no way to end.
+	go func() {
+		refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+		_ = s.registry.Refresh(refreshCtx)
+		s.writeManifest()
+	}()
+
+	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 	go func() {
 		for {
@@ -90,7 +114,9 @@ func (s *Server) Run() error {
 				// in again. The startup Refresh above is what discovers
 				// that state; this is what stops us re-discovering it
 				// every two minutes for the rest of the daemon's life.
-				_ = s.registry.RefreshPeriodic(context.Background())
+				refreshCtx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+				_ = s.registry.RefreshPeriodic(refreshCtx)
+				cancel()
 				s.writeManifest()
 			}
 		}
