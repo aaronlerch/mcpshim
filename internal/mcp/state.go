@@ -54,6 +54,32 @@ func (s *serverState) snapshot() (status Status, lastError string, lastSuccessAt
 	return s.status, s.lastError, s.lastSuccessAt, s.attemptCount
 }
 
+// skipPeriodic reports whether the background ticker should leave this server
+// alone this cycle, and why. Two cases, for different reasons:
+//
+//   - StatusAuthRequired: the stored OAuth credentials are dead and no amount
+//     of retrying replaces them -- only a human at a browser can, via
+//     `mcpshim login --server <name>`. A timer-driven attempt here is a pure
+//     cost: it cannot succeed, and it emits a failing OAuth handshake at every
+//     tick, forever, against somebody else's production endpoint.
+//   - a pending backoff retry: scheduleBackoffRetry already owns the next
+//     attempt. Firing here as well collapses the whole backoff schedule to the
+//     ticker interval, which defeats the point of backing off.
+//
+// This is deliberately consulted ONLY by the periodic path. An explicit
+// `mcpshim refresh` or `reload` still retries everything unconditionally.
+func (s *serverState) skipPeriodic(now time.Time) (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status == StatusAuthRequired {
+		return true, "auth_required"
+	}
+	if !s.pendingRetryAt.IsZero() && s.pendingRetryAt.After(now) {
+		return true, "backoff retry pending"
+	}
+	return false, ""
+}
+
 // recordSuccess marks the server healthy and resets the retry counter. Any
 // pending backoff retry goroutine is canceled.
 func (s *serverState) recordSuccess() {

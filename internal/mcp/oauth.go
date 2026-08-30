@@ -71,10 +71,16 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		PKCEEnabled: true,
 	}
 	// Load persisted client credentials so token refresh can include client_id.
-	if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
-		log.Printf("[oauth:%s] loaded stored client credentials (client_id=%s…)", s.Name, tokenPrefix(storedClient.ClientID))
-		oauthCfg.ClientID = storedClient.ClientID
-		oauthCfg.ClientSecret = storedClient.ClientSecret
+	// A nil store is a supported "no persistence" mode -- newSQLiteTokenStore
+	// and the HasOAuthState check above both handle it, and this call was the
+	// one place on the path that did not, so a Registry built with a nil store
+	// panicked here instead of degrading.
+	if dbStore != nil {
+		if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
+			log.Printf("[oauth:%s] loaded stored client credentials (client_id=%s…)", s.Name, tokenPrefix(storedClient.ClientID))
+			oauthCfg.ClientID = storedClient.ClientID
+			oauthCfg.ClientSecret = storedClient.ClientSecret
+		}
 	}
 
 	oauthClient, closeFn, err := newOAuthClient(ctx, s, oauthCfg)

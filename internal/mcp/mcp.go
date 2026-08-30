@@ -160,6 +160,62 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// RefreshPeriodic is the background ticker's entry point. It is Refresh minus
+// the servers a timer cannot help -- see serverState.skipPeriodic for which and
+// why.
+//
+// Refresh itself stays unconditional on purpose: it backs the user-initiated
+// `mcpshim refresh` / `reload` actions and the one attempt at daemon startup,
+// which is how a server's auth_required state gets discovered in the first
+// place.
+func (r *Registry) RefreshPeriodic(ctx context.Context) error {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	now := time.Now().UTC()
+	attempted := 0
+	var skipped []string
+	for _, s := range cfg.Servers {
+		if skip, reason := r.stateFor(s.Name).skipPeriodic(now); skip {
+			skipped = append(skipped, fmt.Sprintf("%s(%s)", s.Name, reason))
+			continue
+		}
+		attempted++
+		_, _ = r.refreshServer(ctx, s)
+	}
+	if len(skipped) > 0 {
+		log.Printf("[registry] periodic refresh: %d attempted, %d skipped %v", attempted, len(skipped), skipped)
+	} else {
+		log.Printf("[registry] periodic refresh: %d attempted", attempted)
+	}
+	return nil
+}
+
+// Health summarizes per-server connection health: a count keyed by status,
+// plus the names of servers blocked on a human completing a login. The daemon
+// reports both in `mcpshim status` so a stuck server is visible in the command
+// people actually run, not only in the manifest footnote.
+func (r *Registry) Health() (map[string]int, []string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	counts := map[string]int{}
+	var authRequired []string
+	for _, s := range r.cfg.Servers {
+		state, ok := r.states[s.Name]
+		if !ok {
+			counts[string(StatusUnknown)]++
+			continue
+		}
+		status, _, _, _ := state.snapshot()
+		counts[string(status)]++
+		if status == StatusAuthRequired {
+			authRequired = append(authRequired, s.Name)
+		}
+	}
+	return counts, authRequired
+}
+
 // RefreshServer refreshes a single server by name and returns its tools. A
 // successful refresh cancels any pending backoff retry; a failure schedules
 // (or extends) one.

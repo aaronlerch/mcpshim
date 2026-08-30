@@ -85,7 +85,12 @@ func (s *Server) Run() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = s.registry.Refresh(context.Background())
+				// Periodic, not unconditional: a server whose OAuth
+				// credentials are dead stays skipped until the user logs
+				// in again. The startup Refresh above is what discovers
+				// that state; this is what stops us re-discovering it
+				// every two minutes for the rest of the daemon's life.
+				_ = s.registry.RefreshPeriodic(context.Background())
 				s.writeManifest()
 			}
 		}
@@ -141,11 +146,14 @@ func (s *Server) handle(req protocol.Request) protocol.Response {
 func (s *Server) handleCtx(ctx context.Context, req protocol.Request) protocol.Response {
 	switch req.Action {
 	case "status":
+		health, authRequired := s.registry.Health()
 		return protocol.Response{OK: true, Status: &protocol.Status{
-			StartedAt:   s.startedAt,
-			UptimeSec:   int64(time.Since(s.startedAt).Seconds()),
-			ServerCount: len(s.cfg.Servers),
-			ToolCount:   s.registry.ToolCount(),
+			StartedAt:    s.startedAt,
+			UptimeSec:    int64(time.Since(s.startedAt).Seconds()),
+			ServerCount:  len(s.cfg.Servers),
+			ToolCount:    s.registry.ToolCount(),
+			Health:       health,
+			AuthRequired: authRequired,
 		}}
 	case "servers":
 		return protocol.Response{OK: true, Servers: s.registry.Servers()}

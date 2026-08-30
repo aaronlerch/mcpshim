@@ -132,6 +132,10 @@ type Status struct {
 	UptimeSec   int64     `json:"uptime_sec"`
 	ServerCount int       `json:"server_count"`
 	ToolCount   int       `json:"tool_count"`
+	// Health counts servers by connection status; AuthRequired names the ones
+	// waiting on `mcpshim login`. Both omitted when empty.
+	Health       map[string]int `json:"health,omitempty"`
+	AuthRequired []string       `json:"auth_required,omitempty"`
 }
 
 type HistoryItem struct {
