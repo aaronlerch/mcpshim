@@ -284,7 +284,7 @@ func Run(binaryName string, argv []string) int {
 			fmt.Fprintln(os.Stderr, "usage: mcpshim login --server <name>")
 			return 1
 		}
-		return runLoginLocal(server, manual)
+		return runLoginLocal(server, manual, socketPath)
 	case "manifest":
 		fs := flag.NewFlagSet("manifest", flag.ContinueOnError)
 		var pathOnly bool
@@ -989,7 +989,7 @@ func normalizeMultiline(input string) string {
 	return strings.Join(lines, "\n")
 }
 
-func runLoginLocal(server string, manual bool) int {
+func runLoginLocal(server string, manual bool, socketPath string) int {
 	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1010,6 +1010,30 @@ func runLoginLocal(server string, manual bool) int {
 		return 1
 	}
 	fmt.Printf("oauth login completed for %s\n", server)
+
+	// The OAuth flow above ran in THIS process, against a Registry that dies
+	// when the command exits. The token lands in the shared store, but the
+	// daemon's in-memory serverState still reads auth_required -- and
+	// RefreshPeriodic deliberately never re-probes a server in that state, so
+	// nothing would ever correct it. A login that plainly succeeded would leave
+	// the daemon permanently convinced the server was broken, with the tools
+	// missing from the manifest until someone restarted it.
+	//
+	// So tell the daemon to re-probe. The refresh action routes to
+	// RefreshServer, which is unconditional by design and will now find the
+	// token this login just wrote.
+	//
+	// Best effort: the login itself succeeded and the token is persisted, so a
+	// missing daemon is a note on stderr, not a failure exit.
+	if resp, err := call(protocol.Request{Action: "refresh", Server: server}, socketPath); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"note: could not reach the daemon to clear its cached state; run 'mcpshim refresh --server %s' once it is running (%v)\n",
+			server, err)
+	} else if !resp.OK {
+		fmt.Fprintf(os.Stderr,
+			"note: daemon refresh failed; run 'mcpshim refresh --server %s' (%s)\n",
+			server, resp.Error)
+	}
 	return 0
 }
 
