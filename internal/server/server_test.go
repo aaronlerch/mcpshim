@@ -488,3 +488,74 @@ func TestHTTPToolCallIsRecordedUnderCanonicalServiceName(t *testing.T) {
 		t.Fatalf("history = %#v", history)
 	}
 }
+
+func TestRegistryWritesClearOAuthClientWhenEndpointChanges(t *testing.T) {
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	first := httptest.NewServer(notFound)
+	defer first.Close()
+	second := httptest.NewServer(notFound)
+	defer second.Close()
+
+	dbStore, err := store.Open(filepath.Join(t.TempDir(), "mcpshim.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbStore.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{AllowRegistryWrites: true},
+		Servers: []config.MCPServer{{
+			Name:      "example",
+			URL:       first.URL + "/mcp",
+			Transport: "http",
+		}},
+	}
+	srv := New(filepath.Join(t.TempDir(), "config.yaml"), cfg)
+	srv.store = dbStore
+	srv.registry = mcp.NewRegistry(srv.cfg, dbStore)
+
+	if err := dbStore.SaveOAuthClient("example", "client-a", "secret-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same endpoint: the client survives.
+	if resp := srv.handle(protocol.Request{
+		Action: "add_server", Name: "example", URL: first.URL + "/mcp", Transport: "http",
+	}); !resp.OK {
+		t.Fatalf("add_server same URL = %#v", resp)
+	}
+	if c, _ := dbStore.GetOAuthClient("example"); c == nil || c.ClientID != "client-a" {
+		t.Fatalf("client after same-URL upsert = %#v, want client-a kept", c)
+	}
+
+	// New endpoint: the old authorization server's client must not follow it.
+	if resp := srv.handle(protocol.Request{
+		Action: "add_server", Name: "example", URL: second.URL + "/mcp", Transport: "http",
+	}); !resp.OK {
+		t.Fatalf("add_server new URL = %#v", resp)
+	}
+	if c, _ := dbStore.GetOAuthClient("example"); c != nil {
+		t.Fatalf("client after re-point = %#v, want cleared", c)
+	}
+
+	// A client supplied with the re-point is the new one.
+	if resp := srv.handle(protocol.Request{
+		Action: "add_server", Name: "example", URL: first.URL + "/mcp", Transport: "http",
+		ClientID: "client-b", ClientSecret: "secret-b",
+	}); !resp.OK {
+		t.Fatalf("add_server with client = %#v", resp)
+	}
+	if c, _ := dbStore.GetOAuthClient("example"); c == nil || c.ClientID != "client-b" {
+		t.Fatalf("client after re-point with client = %#v, want client-b", c)
+	}
+
+	// Removal clears it, so a later server under the same name starts clean.
+	if resp := srv.handle(protocol.Request{Action: "remove_server", Name: "example"}); !resp.OK {
+		t.Fatalf("remove_server = %#v", resp)
+	}
+	if c, _ := dbStore.GetOAuthClient("example"); c != nil {
+		t.Fatalf("client after remove = %#v, want cleared", c)
+	}
+}

@@ -443,8 +443,14 @@ func (s *Server) applyRegistryChange(req protocol.Request) (protocol.Response, b
 		if s.store != nil {
 			// Re-pointing a name at a new endpoint must not hand the old
 			// endpoint's token to the new one.
+			// The same goes for OAuth client credentials: they are keyed by
+			// name only, and a dynamically registered client_secret belongs to
+			// the old endpoint's authorization server. Sending it to whatever
+			// authorization server the new URL names would leak it. A client
+			// supplied with this same request is saved again just below.
 			if hadPrevious && config.ResolveServer(previous).URL != config.ResolveServer(item).URL {
 				_ = s.store.DeleteTokens(previous.Name, mcp.TokenStoreKey(previous))
+				_ = s.store.DeleteOAuthClient(previous.Name)
 			}
 			if req.ClientID != "" {
 				if err := s.store.SaveOAuthClient(req.Name, req.ClientID, req.ClientSecret); err != nil {
@@ -468,7 +474,10 @@ func (s *Server) applyRegistryChange(req protocol.Request) (protocol.Response, b
 			return protocol.Response{OK: false, Error: err.Error()}, false
 		}
 		if s.store != nil {
+			// Client credentials too: they are keyed by bare name, so leaving
+			// them would hand them to any later server registered under it.
 			_ = s.store.DeleteTokens(removed.Name, mcp.TokenStoreKey(removed))
+			_ = s.store.DeleteOAuthClient(removed.Name)
 		}
 		s.cfg = candidate
 		s.registry.UpdateConfig(candidate)

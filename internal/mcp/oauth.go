@@ -124,7 +124,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 	}
 
 	// Persist client credentials obtained during registration for future sessions.
-	if oauthHandler != nil && oauthHandler.GetClientID() != "" {
+	if dbStore != nil && oauthHandler != nil && oauthHandler.GetClientID() != "" {
 		log.Printf("[oauth:%s] persisting client credentials after OAuth flow", s.Name)
 		_ = dbStore.SaveOAuthClient(s.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret())
 	}
@@ -155,9 +155,11 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		TokenStore:  newSQLiteTokenStore(dbStore, TokenStoreKey(s)),
 		PKCEEnabled: true,
 	}
-	if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
-		oauthCfg.ClientID = storedClient.ClientID
-		oauthCfg.ClientSecret = storedClient.ClientSecret
+	if dbStore != nil {
+		if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
+			oauthCfg.ClientID = storedClient.ClientID
+			oauthCfg.ClientSecret = storedClient.ClientSecret
+		}
 	}
 
 	oauthClient, closeFn, err := newOAuthClient(ctx, s, oauthCfg)
@@ -182,7 +184,7 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 	}
 
 	// Persist client credentials for future sessions.
-	if oauthHandler != nil && oauthHandler.GetClientID() != "" {
+	if dbStore != nil && oauthHandler != nil && oauthHandler.GetClientID() != "" {
 		_ = dbStore.SaveOAuthClient(s.Name, oauthHandler.GetClientID(), oauthHandler.GetClientSecret())
 	}
 	return nil
