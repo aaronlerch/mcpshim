@@ -374,7 +374,10 @@ mcpshim set auth --server acme --client-id $ACME_CLIENT_ID --client-secret $ACME
 ```
 
 Tokens are stored per server name *and* endpoint URL, so re-pointing a server
-at a different URL never sends it the old endpoint's token. To revoke a stored
+at a different URL never sends it the old endpoint's token. Re-pointing (with
+`add` or by editing the config and running `mcpshim reload`) and `remove` also
+drop the server's stored client credentials, which belong to the old
+endpoint's authorization server. To revoke a stored
 token (the next call then asks for `mcpshim login`):
 
 ```bash
