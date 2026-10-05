@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mcpshim/mcpshim/internal/protocol"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type Store struct {
 	db *sql.DB
+	mu sync.RWMutex
 }
 
 func Open(path string) (*Store, error) {
@@ -24,12 +26,23 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("create db directory: %w", err)
 		}
 	}
+	if path != ":memory:" {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("create sqlite db: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return nil, fmt.Errorf("close sqlite db: %w", err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, fmt.Errorf("secure sqlite db: %w", err)
+		}
+	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
-
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
 		_ = db.Close()
@@ -42,6 +55,8 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.db.Close()
 }
 
@@ -81,7 +96,10 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
 	return nil
 }
 
-func (s *Store) InsertHistory(item protocol.HistoryItem) error {
+func (s *Store) InsertHistory(item protocol.HistoryItem, historySize int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var argsJSON string
 	if len(item.Args) > 0 {
 		data, err := json.Marshal(item.Args)
@@ -91,7 +109,13 @@ func (s *Store) InsertHistory(item protocol.HistoryItem) error {
 		argsJSON = string(data)
 	}
 
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin history insert: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
 INSERT INTO call_history (at_utc, server, tool, args_json, success, error, duration_ms)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 `,
@@ -106,10 +130,26 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 	if err != nil {
 		return fmt.Errorf("insert history: %w", err)
 	}
+	if historySize > 0 {
+		if _, err := tx.Exec(`
+DELETE FROM call_history
+WHERE id NOT IN (
+	SELECT id FROM call_history ORDER BY id DESC LIMIT ?
+)
+`, historySize); err != nil {
+			return fmt.Errorf("prune history: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit history insert: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) ListHistory(serverFilter string, toolFilter string, limit int) ([]protocol.HistoryItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -188,7 +228,50 @@ func (s *Store) ListHistory(serverFilter string, toolFilter string, limit int) (
 	return out, nil
 }
 
+func (s *Store) ClearHistory(serverFilter string, toolFilter string, all bool) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if all && (serverFilter != "" || toolFilter != "") {
+		return 0, fmt.Errorf("--all cannot be combined with history filters")
+	}
+	if !all && serverFilter == "" && toolFilter == "" {
+		return 0, fmt.Errorf("history filter or explicit --all is required")
+	}
+
+	query := `DELETE FROM call_history`
+	args := make([]any, 0, 2)
+	where := ""
+	if serverFilter != "" {
+		where += " server = ?"
+		args = append(args, serverFilter)
+	}
+	if toolFilter != "" {
+		if where != "" {
+			where += " AND"
+		}
+		where += " tool = ?"
+		args = append(args, toolFilter)
+	}
+	if where != "" {
+		query += " WHERE" + where
+	}
+
+	result, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("clear history: %w", err)
+	}
+	cleared, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cleared history: %w", err)
+	}
+	return cleared, nil
+}
+
 func (s *Store) GetToken(server string) (*mcpclient.Token, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var tokenJSON string
 	err := s.db.QueryRow(`SELECT token_json FROM oauth_tokens WHERE server = ?`, server).Scan(&tokenJSON)
 	if err != nil {
@@ -208,6 +291,9 @@ func (s *Store) GetToken(server string) (*mcpclient.Token, error) {
 }
 
 func (s *Store) SaveToken(server string, token *mcpclient.Token) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if token == nil {
 		return fmt.Errorf("token is required")
 	}
@@ -233,6 +319,9 @@ type OAuthClient struct {
 }
 
 func (s *Store) GetOAuthClient(server string) (*OAuthClient, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var clientID, clientSecret string
 	err := s.db.QueryRow(`SELECT client_id, client_secret FROM oauth_clients WHERE server = ?`, server).Scan(&clientID, &clientSecret)
 	if err != nil {
@@ -245,6 +334,9 @@ func (s *Store) GetOAuthClient(server string) (*OAuthClient, error) {
 }
 
 func (s *Store) SaveOAuthClient(server string, clientID, clientSecret string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.Exec(`
 INSERT INTO oauth_clients (server, client_id, client_secret, updated_at_utc)
 VALUES (?, ?, ?, ?)
@@ -256,19 +348,54 @@ ON CONFLICT(server) DO UPDATE SET client_id=excluded.client_id, client_secret=ex
 	return nil
 }
 
-// DeleteOAuthToken removes any persisted access/refresh token for server.
-// Returns no error when no row exists.
-func (s *Store) DeleteOAuthToken(server string) error {
-	_, err := s.db.Exec(`DELETE FROM oauth_tokens WHERE server = ?`, server)
-	if err != nil {
-		return fmt.Errorf("delete oauth token: %w", err)
+// DeleteTokens removes persisted access/refresh tokens stored under any of
+// keys. Missing rows are not an error.
+func (s *Store) DeleteTokens(keys ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, err := s.db.Exec(`DELETE FROM oauth_tokens WHERE server = ?`, key); err != nil {
+			return fmt.Errorf("delete token: %w", err)
+		}
 	}
 	return nil
+}
+
+// AdoptToken moves a token stored under legacyKey to key, but only when key
+// has no token of its own. It reports whether a row moved. This is the
+// one-time migration from tokens keyed by bare server name to tokens keyed by
+// server name plus endpoint.
+func (s *Store) AdoptToken(legacyKey, key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if legacyKey == "" || key == "" || legacyKey == key {
+		return false, nil
+	}
+	res, err := s.db.Exec(`
+UPDATE oauth_tokens SET server = ?
+WHERE server = ? AND NOT EXISTS (SELECT 1 FROM oauth_tokens WHERE server = ?)
+`, key, legacyKey, key)
+	if err != nil {
+		return false, fmt.Errorf("adopt token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("adopt token: %w", err)
+	}
+	return n > 0, nil
 }
 
 // DeleteOAuthClient removes persisted dynamic-registration client credentials
 // for server. Returns no error when no row exists.
 func (s *Store) DeleteOAuthClient(server string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.Exec(`DELETE FROM oauth_clients WHERE server = ?`, server)
 	if err != nil {
 		return fmt.Errorf("delete oauth client: %w", err)
@@ -276,11 +403,27 @@ func (s *Store) DeleteOAuthClient(server string) error {
 	return nil
 }
 
-// HasOAuthState returns true if this server has stored OAuth tokens or client credentials.
-func (s *Store) HasOAuthState(server string) bool {
+// HasOAuthState reports whether any of tokenKeys has a stored token, or
+// clientKey has stored client credentials.
+func (s *Store) HasOAuthState(clientKey string, tokenKeys ...string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var n int
-	_ = s.db.QueryRow(`SELECT 1 FROM oauth_tokens WHERE server = ? UNION SELECT 1 FROM oauth_clients WHERE server = ?`, server, server).Scan(&n)
-	return n == 1
+	if clientKey != "" {
+		if err := s.db.QueryRow(`SELECT 1 FROM oauth_clients WHERE server = ?`, clientKey).Scan(&n); err == nil {
+			return true
+		}
+	}
+	for _, key := range tokenKeys {
+		if key == "" {
+			continue
+		}
+		if err := s.db.QueryRow(`SELECT 1 FROM oauth_tokens WHERE server = ?`, key).Scan(&n); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func boolToInt(value bool) int {

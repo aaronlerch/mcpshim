@@ -23,6 +23,7 @@ type Request struct {
 	ClientID          string                 `json:"client_id,omitempty"`
 	ClientSecret      string                 `json:"client_secret,omitempty"`
 	Full              bool                   `json:"full,omitempty"`
+	All               bool                   `json:"all,omitempty"`
 }
 
 // ElicitationRequest is sent from the daemon to the CLI mid-call when the
@@ -48,6 +49,7 @@ type ElicitationAnswer struct {
 type ServerInfo struct {
 	Name          string    `json:"name"`
 	Alias         string    `json:"alias,omitempty"`
+	Kind          string    `json:"kind"`
 	URL           string    `json:"url"`
 	Transport     string    `json:"transport"`
 	HasAuth       bool      `json:"has_auth"`
@@ -165,4 +167,5 @@ type Response struct {
 	Elicitation      *ElicitationRequest `json:"elicitation,omitempty"`
 	ManifestPath     string              `json:"manifest_path,omitempty"`
 	ManifestContent  string              `json:"manifest_content,omitempty"`
+	Cleared          int64               `json:"cleared,omitempty"`
 }

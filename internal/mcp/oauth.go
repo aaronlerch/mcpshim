@@ -21,6 +21,7 @@ import (
 	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mcpshim/mcpshim/internal/config"
 	"github.com/mcpshim/mcpshim/internal/store"
+	"github.com/mcpshim/mcpshim/internal/version"
 )
 
 const oauthCallbackTimeout = 5 * time.Minute
@@ -33,7 +34,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		return runOperation(ctx, s, operation)
 	}
 	// Skip the unauthenticated probe if this server has prior OAuth state — it will always 401.
-	if hasAuthorizationHeader(s.Headers) || (dbStore != nil && !dbStore.HasOAuthState(s.Name)) {
+	if hasAuthorizationHeader(s.Headers) || !hasOAuthState(dbStore, s) {
 		log.Printf("[oauth:%s] attempting direct (non-OAuth) operation", s.Name)
 		result, err := runOperation(ctx, s, operation)
 		if err == nil {
@@ -67,7 +68,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 
 	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
-		TokenStore:  newSQLiteTokenStore(dbStore, s.Name),
+		TokenStore:  newSQLiteTokenStore(dbStore, TokenStoreKey(s)),
 		PKCEEnabled: true,
 	}
 	// Load persisted client credentials so token refresh can include client_id.
@@ -148,9 +149,10 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		redirectURI = callback.redirectURI
 	}
 
+	adoptLegacyToken(dbStore, s)
 	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
-		TokenStore:  newSQLiteTokenStore(dbStore, s.Name),
+		TokenStore:  newSQLiteTokenStore(dbStore, TokenStoreKey(s)),
 		PKCEEnabled: true,
 	}
 	if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
@@ -205,7 +207,7 @@ func runOperationWithClient[T any](ctx context.Context, client compatibleClient,
 	}
 	initReq := mcpproto.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcpproto.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcpproto.Implementation{Name: "mcpshimd", Version: "dev"}
+	initReq.Params.ClientInfo = mcpproto.Implementation{Name: "mcpshimd", Version: version.Version}
 	if _, err := client.Initialize(ctx, initReq); err != nil {
 		log.Printf("[mcp] client.Initialize failed: %v", err)
 		var zero T

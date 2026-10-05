@@ -10,6 +10,23 @@ import (
 // (or to the default in the :-default form). This matches the subset
 // of shell expansion that Claude Code uses for MCP configs.
 func expandEnv(s string) string {
+	out, _ := expandEnvStrict(s)
+	return out
+}
+
+// expandEnvStrict expands like expandEnv and also reports the first variable
+// that was referenced without a default and is unset. Callers that want a
+// missing variable to be an error (HTTP service validation) use the second
+// result; MCP servers keep the unset-means-empty behavior.
+func expandEnvStrict(s string) (string, string) {
+	missing := ""
+	lookup := func(name string) string {
+		v, ok := os.LookupEnv(name)
+		if !ok && missing == "" {
+			missing = name
+		}
+		return v
+	}
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] != '$' {
@@ -42,7 +59,7 @@ func expandEnv(s string) string {
 					b.WriteString(fallback)
 				}
 			} else {
-				b.WriteString(os.Getenv(spec))
+				b.WriteString(lookup(spec))
 			}
 			i = i + 2 + rel
 			continue
@@ -55,10 +72,10 @@ func expandEnv(s string) string {
 		for j < len(s) && isVarRune(s[j]) {
 			j++
 		}
-		b.WriteString(os.Getenv(s[i+1 : j]))
+		b.WriteString(lookup(s[i+1 : j]))
 		i = j - 1
 	}
-	return b.String()
+	return b.String(), missing
 }
 
 func isVarStart(c byte) bool {

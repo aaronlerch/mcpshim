@@ -12,15 +12,19 @@ import (
 // logged but never propagated — a stale manifest is annoying but not fatal,
 // and we'd rather complete the user's command than abort over a write error.
 func (s *Server) writeManifest() {
-	if s == nil || s.cfg == nil || s.registry == nil {
+	if s == nil {
 		return
 	}
-	path := s.cfg.Server.ManifestPath
+	cfg, registry, _ := s.snapshot()
+	if cfg == nil || registry == nil {
+		return
+	}
+	path := cfg.Server.ManifestPath
 	if path == "" {
 		return
 	}
 	var buf bytes.Buffer
-	if err := s.registry.RenderManifest(&buf); err != nil {
+	if err := registry.RenderManifest(&buf); err != nil {
 		log.Printf("[manifest] render failed: %v", err)
 		return
 	}
@@ -32,11 +36,12 @@ func (s *Server) writeManifest() {
 
 // manifestContent renders the manifest to a string for direct CLI display.
 func (s *Server) manifestContent() (string, error) {
-	if s.registry == nil {
+	_, registry, _ := s.snapshot()
+	if registry == nil {
 		return "", fmt.Errorf("registry not initialized")
 	}
 	var buf bytes.Buffer
-	if err := s.registry.RenderManifest(&buf); err != nil {
+	if err := registry.RenderManifest(&buf); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

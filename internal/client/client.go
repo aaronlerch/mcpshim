@@ -73,17 +73,7 @@ func Run(binaryName string, argv []string) int {
 			fmt.Fprintf(os.Stderr, "%s requires a tool name\n", binaryName)
 			return 1
 		}
-		resp, err := call(protocol.Request{
-			Action: "call",
-			Server: binaryName,
-			Tool:   argv[0],
-			Args:   parseDynamicArgs(argv[1:]),
-		}, config.DefaultSocketPath())
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		return printResponse(resp, true)
+		return runCall(append([]string{binaryName}, argv...), config.DefaultSocketPath(), true)
 	}
 
 	if len(argv) == 0 {
@@ -229,11 +219,27 @@ func Run(binaryName string, argv []string) int {
 		fs := flag.NewFlagSet("history", flag.ContinueOnError)
 		var server, tool string
 		var limit int
+		var clear, all bool
 		fs.StringVar(&server, "server", "", "filter by server name or alias")
 		fs.StringVar(&tool, "tool", "", "filter by tool name")
 		fs.IntVar(&limit, "limit", 50, "max entries to return (1-500)")
+		fs.BoolVar(&clear, "clear", false, "delete matching history instead of listing it")
+		fs.BoolVar(&all, "all", false, "with --clear, explicitly delete all history")
 		_ = fs.Parse(rest)
-		resp, err := call(protocol.Request{Action: "history", Server: server, Tool: tool, Limit: limit}, socketPath)
+		action := "history"
+		if clear {
+			action = "clear_history"
+		} else if all {
+			fmt.Fprintln(os.Stderr, "--all requires --clear")
+			return 1
+		}
+		resp, err := call(protocol.Request{
+			Action: action,
+			Server: server,
+			Tool:   tool,
+			Limit:  limit,
+			All:    all,
+		}, socketPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -425,17 +431,7 @@ func Run(binaryName string, argv []string) int {
 		return runScriptCommand(rest, socketPath)
 	default:
 		if len(rest) > 0 {
-			resp, err := call(protocol.Request{
-				Action: "call",
-				Server: cmd,
-				Tool:   rest[0],
-				Args:   parseDynamicArgs(rest[1:]),
-			}, socketPath)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 1
-			}
-			return printResponse(resp, jsonOut)
+			return runCall(append([]string{cmd}, rest...), socketPath, jsonOut)
 		}
 		usage()
 		return 1
@@ -527,8 +523,13 @@ func runCall(args []string, socket string, jsonOut bool) int {
 		return printCallHelp(server, tool, socket)
 	}
 
-	dynamicArgs := parseDynamicArgs(rest)
-	if detail, err := fetchToolDetail(server, tool, socket); err == nil && detail != nil {
+	var detail *protocol.ToolDetail
+	if fetched, fetchErr := fetchToolDetail(server, tool, socket); fetchErr == nil {
+		detail = fetched
+	}
+	dynamicArgs := parseDynamicArgsForProperties(rest, nil)
+	if detail != nil {
+		dynamicArgs = parseDynamicArgsForProperties(rest, detail.Properties)
 		missing := []string{}
 		for _, p := range detail.Properties {
 			if p.Required {
@@ -1038,6 +1039,14 @@ func runLoginLocal(server string, manual bool, socketPath string) int {
 }
 
 func parseDynamicArgs(args []string) map[string]interface{} {
+	return parseDynamicArgsForProperties(args, nil)
+}
+
+func parseDynamicArgsForProperties(args []string, properties []protocol.PropertyDetail) map[string]interface{} {
+	types := make(map[string]string, len(properties))
+	for _, property := range properties {
+		types[property.Name] = property.Type
+	}
 	out := map[string]interface{}{}
 	for i := 0; i < len(args); i++ {
 		item := args[i]
@@ -1047,11 +1056,11 @@ func parseDynamicArgs(args []string) map[string]interface{} {
 		key := strings.TrimPrefix(item, "--")
 		if strings.Contains(key, "=") {
 			parts := strings.SplitN(key, "=", 2)
-			out[parts[0]] = normalize(parts[1])
+			out[parts[0]] = normalizeAs(parts[1], types[parts[0]])
 			continue
 		}
 		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
-			out[key] = normalize(args[i+1])
+			out[key] = normalizeAs(args[i+1], types[key])
 			i++
 			continue
 		}
@@ -1061,28 +1070,39 @@ func parseDynamicArgs(args []string) map[string]interface{} {
 }
 
 func normalize(v string) interface{} {
-	// JSON arrays/objects: parse so structured params survive (e.g. add-tasks
-	// `tasks`, complete-tasks `ids`). Without this they reach the upstream tool
-	// as a raw string and fail schema validation ("expected array, received string").
-	if trimmed := strings.TrimSpace(v); len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
-			return parsed
+	return normalizeAs(v, "")
+}
+
+func normalizeAs(v string, propertyType string) interface{} {
+	if propertyType == "string" {
+		return v
+	}
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "null" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var structured interface{}
+		if err := json.Unmarshal([]byte(trimmed), &structured); err == nil {
+			return structured
 		}
 	}
 	// Booleans: only the explicit literals. strconv.ParseBool also accepts
 	// "1"/"0"/"t"/"f", which would wrongly turn a numeric arg like --limit 1
-	// into a boolean ("expected number, received boolean").
-	if strings.EqualFold(v, "true") {
-		return true
+	// into a boolean ("expected number, received boolean") whenever the
+	// schema is unavailable.
+	if propertyType == "" || propertyType == "boolean" {
+		if strings.EqualFold(trimmed, "true") {
+			return true
+		}
+		if strings.EqualFold(trimmed, "false") {
+			return false
+		}
 	}
-	if strings.EqualFold(v, "false") {
-		return false
-	}
-	if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+	if i, err := strconv.ParseInt(v, 10, 64); err == nil && (propertyType == "" || propertyType == "integer") {
 		return i
 	}
-	if f, err := strconv.ParseFloat(v, 64); err == nil {
+	if f, err := strconv.ParseFloat(v, 64); err == nil && (propertyType == "" || propertyType == "number") {
 		return f
 	}
 	return v
@@ -1239,7 +1259,11 @@ func printResponse(resp *protocol.Response, jsonOut bool) int {
 				if target == "" {
 					target = "(stdio)"
 				}
-				line := fmt.Sprintf("%s %s (%s) %s", badge, s.Name, s.Transport, target)
+				kind := s.Transport
+				if s.Kind == "http" {
+					kind = "http-service"
+				}
+				line := fmt.Sprintf("%s %s (%s) %s", badge, s.Name, kind, target)
 				if s.AttemptCount > 0 && status != "healthy" {
 					line += fmt.Sprintf(" attempts=%d", s.AttemptCount)
 				}
@@ -1450,7 +1474,7 @@ func usage() {
 	fmt.Println("  login --server name [--manual]")
 	fmt.Println("  logout --server name [--full]")
 	fmt.Println("  status")
-	fmt.Println("  history [--server name] [--tool name] [--limit 50]")
+	fmt.Println("  history [--server name] [--tool name] [--limit 50] [--clear [--all]]")
 	fmt.Println("  resources [--server name]")
 	fmt.Println("  read --server name --uri 'protocol://path'")
 	fmt.Println("  prompts [--server name]")

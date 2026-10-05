@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mcpshim/mcpshim/internal/config"
+	"github.com/mcpshim/mcpshim/internal/httpbinding"
 	"github.com/mcpshim/mcpshim/internal/manifest"
 	"github.com/mcpshim/mcpshim/internal/protocol"
 	"github.com/mcpshim/mcpshim/internal/store"
@@ -33,6 +35,29 @@ type Registry struct {
 	cacheStamp time.Time
 	states     map[string]*serverState
 	backoff    []time.Duration
+}
+
+type ToolCallError struct {
+	Result *mcpproto.CallToolResult
+	text   string
+}
+
+func (e *ToolCallError) Error() string {
+	return e.text
+}
+
+func newToolCallError(result *mcpproto.CallToolResult) *ToolCallError {
+	messages := make([]string, 0, len(result.Content))
+	for _, content := range result.Content {
+		if text := strings.TrimSpace(mcpproto.GetTextFromContent(content)); text != "" {
+			messages = append(messages, text)
+		}
+	}
+	message := strings.Join(messages, "\n")
+	if message == "" {
+		message = "MCP tool reported an error"
+	}
+	return &ToolCallError{Result: result, text: message}
 }
 
 func NewRegistry(cfg *config.Config, dbStore *store.Store) *Registry {
@@ -88,6 +113,7 @@ func (r *Registry) Servers() []protocol.ServerInfo {
 		info := protocol.ServerInfo{
 			Name:      s.Name,
 			Alias:     s.Alias,
+			Kind:      "mcp",
 			URL:       s.URL,
 			Transport: s.Transport,
 			HasAuth:   hasAuthorizationHeader(s.Headers),
@@ -103,6 +129,17 @@ func (r *Registry) Servers() []protocol.ServerInfo {
 		}
 		out = append(out, info)
 	}
+	for _, service := range r.cfg.HTTPServices {
+		out = append(out, protocol.ServerInfo{
+			Name:      service.Name,
+			Alias:     service.Alias,
+			Kind:      "http",
+			URL:       service.BaseURL,
+			Transport: "http",
+			HasAuth:   hasAuthorizationHeader(service.Headers),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -124,19 +161,26 @@ func (r *Registry) ListTools(ctx context.Context, server string) ([]protocol.Too
 
 	if server != "" {
 		s, ok := findServer(cfg, server)
-		if !ok {
-			return nil, fmt.Errorf("unknown server %q", server)
+		if ok {
+			return fetchToolsForServer(ctx, s, r.store, false)
 		}
-		return fetchToolsForServer(ctx, s, r.store, true)
+		service, ok := findHTTPService(cfg, server)
+		if ok {
+			return httpbinding.ListTools(service), nil
+		}
+		return nil, fmt.Errorf("unknown server %q", server)
 	}
 
 	all := []protocol.ToolInfo{}
 	for _, s := range cfg.Servers {
-		items, err := fetchToolsForServer(ctx, s, r.store, true)
+		items, err := fetchToolsForServer(ctx, s, r.store, false)
 		if err != nil {
 			continue
 		}
 		all = append(all, items...)
+	}
+	for _, service := range cfg.HTTPServices {
+		all = append(all, httpbinding.ListTools(service)...)
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Server == all[j].Server {
@@ -156,8 +200,24 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	for _, s := range cfg.Servers {
 		_, _ = r.refreshServer(ctx, s)
 	}
+	r.cacheHTTPServices(cfg)
 	log.Printf("[registry] refresh complete")
 	return nil
+}
+
+// cacheHTTPServices records the tools of every configured HTTP service. They
+// are derived from config alone -- no network -- so there is nothing to probe
+// and no per-server state to track.
+func (r *Registry) cacheHTTPServices(cfg *config.Config) {
+	if len(cfg.HTTPServices) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, service := range cfg.HTTPServices {
+		r.toolCache[service.Name] = httpbinding.ListTools(service)
+	}
+	r.cacheStamp = time.Now().UTC()
 }
 
 // RefreshPeriodic is the background ticker's entry point. It is Refresh minus
@@ -184,6 +244,7 @@ func (r *Registry) RefreshPeriodic(ctx context.Context) error {
 		attempted++
 		_, _ = r.refreshServer(ctx, s)
 	}
+	r.cacheHTTPServices(cfg)
 	if len(skipped) > 0 {
 		log.Printf("[registry] periodic refresh: %d attempted, %d skipped %v", attempted, len(skipped), skipped)
 	} else {
@@ -305,6 +366,7 @@ func (r *Registry) ManifestSnapshot() manifest.Snapshot {
 		info := protocol.ServerInfo{
 			Name:      s.Name,
 			Alias:     s.Alias,
+			Kind:      "mcp",
 			URL:       s.URL,
 			Transport: s.Transport,
 			HasAuth:   hasAuthorizationHeader(s.Headers),
@@ -320,6 +382,19 @@ func (r *Registry) ManifestSnapshot() manifest.Snapshot {
 		}
 		servers = append(servers, info)
 		configBy[s.Name] = s
+	}
+	for _, service := range r.cfg.HTTPServices {
+		// HTTP services have no connection to probe: their tools come from
+		// config, so they are as healthy as the config that defines them.
+		servers = append(servers, protocol.ServerInfo{
+			Name:      service.Name,
+			Alias:     service.Alias,
+			Kind:      "http",
+			URL:       service.BaseURL,
+			Transport: "http",
+			HasAuth:   hasAuthorizationHeader(service.Headers),
+			Status:    string(StatusHealthy),
+		})
 	}
 	tools := make(map[string][]protocol.ToolInfo, len(r.toolCache))
 	for name, items := range r.toolCache {
@@ -358,10 +433,14 @@ func (r *Registry) InspectTool(ctx context.Context, server, tool string) (*proto
 
 	s, ok := findServer(cfg, server)
 	if !ok {
+		service, serviceOK := findHTTPService(cfg, server)
+		if serviceOK {
+			return httpbinding.InspectTool(service, tool)
+		}
 		return nil, fmt.Errorf("unknown server %q", server)
 	}
 
-	tools, err := fetchToolsRaw(ctx, s, r.store, true)
+	tools, err := fetchToolsRaw(ctx, s, r.store, false)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +466,10 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 
 	s, ok := findServer(cfg, server)
 	if !ok {
+		service, serviceOK := findHTTPService(cfg, server)
+		if serviceOK {
+			return httpbinding.Call(ctx, service, tool, args)
+		}
 		return nil, fmt.Errorf("unknown server %q", server)
 	}
 	if args == nil {
@@ -394,7 +477,7 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 	}
 
 	log.Printf("[registry] Call server=%q tool=%q", server, tool)
-	res, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) (interface{}, error) {
+	res, err := runWithOAuthFallback(ctx, s, r.store, false, func(cli compatibleClient) (interface{}, error) {
 		req := mcpproto.CallToolRequest{}
 		req.Params.Name = tool
 		req.Params.Arguments = args
@@ -403,11 +486,16 @@ func (r *Registry) Call(ctx context.Context, server string, tool string, args ma
 		if err != nil {
 			return nil, err
 		}
+		if result.IsError {
+			return result, newToolCallError(result)
+		}
 		return result, nil
 	})
 	if err != nil {
 		log.Printf("[registry] Call server=%q tool=%q failed: %v", server, tool, err)
-		return nil, err
+		// res is non-nil for a tool-level error (ToolCallError) so the caller
+		// can still show the content the tool returned.
+		return res, err
 	}
 	log.Printf("[registry] Call server=%q tool=%q succeeded", server, tool)
 	return res, nil
@@ -419,7 +507,7 @@ func (r *Registry) ListResources(ctx context.Context, server string) ([]protocol
 	r.mu.RUnlock()
 
 	collect := func(s config.MCPServer) ([]protocol.ResourceInfo, error) {
-		raw, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.Resource, error) {
+		raw, err := runWithOAuthFallback(ctx, s, r.store, false, func(cli compatibleClient) ([]mcpproto.Resource, error) {
 			res, err := cli.ListResources(ctx, mcpproto.ListResourcesRequest{})
 			if err != nil {
 				return nil, err
@@ -481,7 +569,7 @@ func (r *Registry) ReadResource(ctx context.Context, server, uri string) ([]prot
 		return nil, fmt.Errorf("resource uri is required")
 	}
 
-	contents, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.ResourceContents, error) {
+	contents, err := runWithOAuthFallback(ctx, s, r.store, false, func(cli compatibleClient) ([]mcpproto.ResourceContents, error) {
 		req := mcpproto.ReadResourceRequest{}
 		req.Params.URI = uri
 		res, err := cli.ReadResource(ctx, req)
@@ -518,7 +606,7 @@ func (r *Registry) ListPrompts(ctx context.Context, server string) ([]protocol.P
 	r.mu.RUnlock()
 
 	collect := func(s config.MCPServer) ([]protocol.PromptInfo, error) {
-		raw, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) ([]mcpproto.Prompt, error) {
+		raw, err := runWithOAuthFallback(ctx, s, r.store, false, func(cli compatibleClient) ([]mcpproto.Prompt, error) {
 			res, err := cli.ListPrompts(ctx, mcpproto.ListPromptsRequest{})
 			if err != nil {
 				return nil, err
@@ -587,7 +675,7 @@ func (r *Registry) GetPrompt(ctx context.Context, server, name string, args map[
 		return nil, fmt.Errorf("prompt name is required")
 	}
 
-	res, err := runWithOAuthFallback(ctx, s, r.store, true, func(cli compatibleClient) (*mcpproto.GetPromptResult, error) {
+	res, err := runWithOAuthFallback(ctx, s, r.store, false, func(cli compatibleClient) (*mcpproto.GetPromptResult, error) {
 		req := mcpproto.GetPromptRequest{}
 		req.Params.Name = name
 		req.Params.Arguments = args
@@ -616,6 +704,9 @@ func (r *Registry) Login(ctx context.Context, server string, manual bool) error 
 
 	s, ok := findServer(cfg, server)
 	if !ok {
+		if _, serviceOK := findHTTPService(cfg, server); serviceOK {
+			return fmt.Errorf("http service %q does not use MCP OAuth login", server)
+		}
 		return fmt.Errorf("unknown server %q", server)
 	}
 
@@ -785,6 +876,7 @@ func newClient(ctx context.Context, s config.MCPServer) (compatibleClient, func(
 // buildTransport constructs the lower-level mcp-go transport for s. When
 // oauthCfg is non-nil it layers OAuth in (HTTP/SSE only).
 func buildTransport(s config.MCPServer, oauthCfg *mcpclient.OAuthConfig) (transport.Interface, error) {
+	s = config.ResolveServer(s)
 	switch s.Transport {
 	case "stdio":
 		if oauthCfg != nil {
@@ -905,4 +997,13 @@ func findServer(cfg *config.Config, nameOrAlias string) (config.MCPServer, bool)
 		}
 	}
 	return config.MCPServer{}, false
+}
+
+func findHTTPService(cfg *config.Config, nameOrAlias string) (config.HTTPService, bool) {
+	for _, service := range cfg.HTTPServices {
+		if service.Name == nameOrAlias || service.Alias == nameOrAlias {
+			return service, true
+		}
+	}
+	return config.HTTPService{}, false
 }

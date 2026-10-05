@@ -2,21 +2,61 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mcpshim/mcpshim/internal/config"
 	"github.com/mcpshim/mcpshim/internal/store"
 )
+
+// TokenStoreKey binds a stored OAuth token to both the logical server and its
+// endpoint. Re-pointing a server name must never send an existing token to the
+// replacement URL.
+func TokenStoreKey(server config.MCPServer) string {
+	resolved := config.ResolveServer(server)
+	sum := sha256.Sum256([]byte(resolved.URL))
+	return fmt.Sprintf("%s:%x", server.Name, sum)
+}
+
+// adoptLegacyToken moves a token stored under the bare server name (the key
+// used before tokens were bound to their endpoint) to TokenStoreKey(s). It only
+// moves a row when the bound key is empty, so it runs at most once per server
+// and never overwrites a token issued for the current endpoint. Without this,
+// upgrading would silently log every OAuth server out.
+func adoptLegacyToken(dbStore *store.Store, s config.MCPServer) {
+	if dbStore == nil {
+		return
+	}
+	moved, err := dbStore.AdoptToken(s.Name, TokenStoreKey(s))
+	if err != nil {
+		log.Printf("[token:%s] legacy token migration failed: %v", s.Name, err)
+		return
+	}
+	if moved {
+		log.Printf("[token:%s] migrated legacy token to endpoint-bound key", s.Name)
+	}
+}
+
+// hasOAuthState reports whether s has a stored token for its current endpoint
+// or stored client credentials. A nil store has no state.
+func hasOAuthState(dbStore *store.Store, s config.MCPServer) bool {
+	if dbStore == nil {
+		return false
+	}
+	adoptLegacyToken(dbStore, s)
+	return dbStore.HasOAuthState(s.Name, TokenStoreKey(s))
+}
 
 type sqliteTokenStore struct {
 	store      *store.Store
 	serverName string
 }
 
-func newSQLiteTokenStore(dbStore *store.Store, serverName string) transport.TokenStore {
+func newSQLiteTokenStore(dbStore *store.Store, serverName string) *sqliteTokenStore {
 	return &sqliteTokenStore{store: dbStore, serverName: serverName}
 }
 

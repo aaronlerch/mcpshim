@@ -125,7 +125,7 @@ func TestSummarizeStripsLeadingMarkup(t *testing.T) {
 	cases := map[string]string{
 		"":              "",
 		"hello":         "hello",
-		"<example>x":   "",
+		"<example>x":    "",
 		"first\nsecond": "first",
 	}
 	for in, want := range cases {

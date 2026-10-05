@@ -28,13 +28,16 @@ Key internal packages:
 - **`internal/server`** — Daemon runtime. Listens on Unix socket, dispatches actions via a single `handle(req)` switch statement. Manages config reload, server CRUD, and tool call history recording.
 - **`internal/client`** — CLI-side IPC client. Sends JSON requests to the socket, receives responses.
 - **`internal/mcp`** — MCP transport layer using `mcp-go` library. `Registry` holds live MCP client sessions, handles tool discovery (`Refresh`), tool calls, and OAuth flows. `oauth.go` and `token_store.go` handle OAuth token persistence in SQLite.
-- **`internal/config`** — YAML config loading/saving with XDG path defaults. Environment variable expansion in URLs and headers. Atomic save via tmp-file-then-rename.
-- **`internal/store`** — SQLite persistence for call history and OAuth tokens.
+- **`internal/config`** — YAML config loading/saving with XDG path defaults. `${VAR}` / `${VAR:-default}` references stay raw in the loaded config and are expanded per use by `config.ResolveServer`, so a save never writes resolved secrets. Atomic save via tmp-file-then-rename.
+- **`internal/httpbinding`** — exposes configured plain HTTP APIs (`http_services`) as typed or constrained raw tools. Outbound only; no listener.
+- **`internal/store`** — SQLite persistence (pure-Go `modernc.org/sqlite`, so `CGO_ENABLED=0` works) for call history, OAuth tokens, and OAuth client credentials. Tokens are keyed by `mcp.TokenStoreKey` (server name + endpoint hash); a token under the legacy bare-name key is adopted once on first use.
 
 ## Key Design Details
 
 - Config uses strict YAML parsing (`KnownFields(true)`) — unknown fields cause load errors.
 - Transport values normalize to `"http"` (default) or `"sse"`.
 - The daemon refreshes MCP server tool lists every 2 minutes via `registry.Refresh`.
+- `add`, `set auth`, and `remove` over the socket are refused unless `server.allow_registry_writes: true`; they rewrite the config file, which can add a `headers_helper` or stdio command the daemon would execute.
+- The daemon never starts a browser OAuth flow on its own for calls or refreshes; it reports `auth_required` and `mcpshim login` (CLI process) does the flow.
 - Config saves are atomic: write to `.tmp`, validate by re-loading, then rename.
 - All paths follow XDG conventions with env var overrides (`MCPSHIM_CONFIG`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`).

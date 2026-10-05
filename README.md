@@ -5,8 +5,8 @@
 <h1 align="center">MCPShim</h1>
 
 <p align="center">
-	<strong>Use any MCP server as a standard CLI command.</strong><br/>
-	A lightweight daemon + CLI that turns remote MCP tools into native shell commands your agent or script can call directly.
+	<strong>Use any MCP server or HTTP API as a standard CLI command.</strong><br/>
+	A lightweight daemon + CLI that turns remote MCP tools and configured HTTP endpoints into native shell commands your agent or script can call directly.
 </p>
 
 <p align="center">
@@ -17,15 +17,19 @@
 
 ## The Problem
 
-Remote MCP servers are powerful, but each service has its own auth flow, transport expectations, and invocation patterns. Wiring all of that directly into every script or agent loop creates brittle command workflows.
+Remote MCP servers and HTTP APIs are powerful, but each service has its own auth flow, transport expectations, and invocation patterns. Wiring all of that directly into every script or agent loop creates brittle command workflows.
 
 For LLM agents, there is also context pressure: dumping raw MCP schemas for every connected server can consume prompt budget before useful work begins.
 
 ## The Solution
 
-`mcpshimd` handles MCP lifecycle concerns in one place: session management, discovery, retries, and OAuth flow.
+`mcpshimd` centralizes MCP registration and OAuth alongside configured HTTP
+service bindings, discovery, call execution, and history behind one local
+socket.
 
-`mcpshim` exposes every remote MCP tool as a standard CLI command - flags map to tool parameters, output comes back as structured JSON. No SDKs, no libraries, just shell commands that work with any language or agent.
+`mcpshim` exposes every remote MCP tool and configured HTTP operation as a
+standard CLI command. Flags map to tool parameters and output comes back as
+structured JSON. No SDKs or libraries are required by the caller.
 
 ```mermaid
 graph TD
@@ -37,6 +41,7 @@ graph TD
 		Daemon --> MCP1["MCP Server: Notion"]
 		Daemon --> MCP2["MCP Server: GitHub"]
 		Daemon --> MCP3["MCP Server: Linear"]
+		Daemon --> HTTP["Configured HTTP API"]
 		Daemon --> MCPN["..."]
 ```
 
@@ -44,9 +49,10 @@ graph TD
 
 |                          | Without MCPShim               | With MCPShim                        |
 | ------------------------ | ----------------------------- | ----------------------------------- |
-| **MCP integration**      | Custom per-server wiring      | One daemon + one CLI                |
+| **Tool integration**     | Custom per-service wiring     | One daemon + one CLI                |
 | **Auth handling**        | Per-script OAuth/header logic | Centralized in `mcpshimd`           |
 | **Tool invocation**      | Provider-specific conventions | `mcpshim call --server --tool ...`  |
+| **HTTP API binding**     | Hand-written client code       | Typed or constrained raw tools     |
 | **Agent context budget** | Large MCP schemas in prompt   | Alias-based local command workflows |
 | **Operational history**  | Ad-hoc logging                | Built-in call history in SQLite     |
 
@@ -56,27 +62,10 @@ graph TD
 
 | Component  | Role                                                              |
 | ---------- | ----------------------------------------------------------------- |
-| `mcpshimd` | Local daemon for MCP registry, sessions, auth, retries, and IPC   |
+| `mcpshimd` | Local daemon for MCP/HTTP registry, discovery, auth, calls, and IPC |
 | `mcpshim`  | CLI client for config, discovery, tool calls, history, and script |
 
 All client calls go through a Unix socket and JSON request/response protocol.
-
-## Source Layout
-
-```
-cmd/
-	mcpshimd/             # Daemon entry point
-	mcpshim/              # CLI entry point
-configs/
-	mcpshim.example.yaml  # Example configuration
-internal/
-	client/               # CLI command handling and IPC client logic
-	config/               # Config loading and defaults
-	mcp/                  # MCP transport + OAuth handling
-	protocol/             # Request/response protocol types
-	server/               # Daemon runtime and routing
-	store/                # SQLite persistence
-```
 
 ## Quick Start
 
@@ -91,7 +80,13 @@ go install github.com/mcpshim/mcpshim/cmd/mcpshim@latest
 
 ```bash
 mkdir -p ~/.config/mcpshim
-cp configs/mcpshim.example.yaml ~/.config/mcpshim/config.yaml
+cat > ~/.config/mcpshim/config.yaml <<'YAML'
+servers:
+  - name: notion
+    alias: notion
+    transport: http
+    url: https://mcp.notion.com/mcp
+YAML
 ```
 
 ### 3. Start daemon and inspect
@@ -159,13 +154,13 @@ Not bundled — file an issue or PR if you want a `launchd` plist. A minimal pli
 
 | Command                                               | Description                      |
 | ----------------------------------------------------- | -------------------------------- |
-| `mcpshim servers`                                     | List registered MCP servers      |
+| `mcpshim servers`                                     | List registered MCP/HTTP services |
 | `mcpshim tools [--server name] [--full]`              | List tools for all or one server |
 | `mcpshim inspect --server s --tool t`                 | Show tool schema/details         |
 | `mcpshim call --server s --tool t --arg value`        | Execute a tool call              |
-| `mcpshim add --name s --url ... [--alias a]`          | Register a new MCP endpoint      |
-| `mcpshim set auth --server s --header K=V`            | Set auth headers for a server    |
-| `mcpshim remove --name s`                             | Remove a registered server       |
+| `mcpshim add --name s --url ... [--alias a]`          | Register a new MCP endpoint (opt-in) |
+| `mcpshim set auth --server s --header K=V`            | Set auth headers for a server (opt-in) |
+| `mcpshim remove --name s`                             | Remove a registered server (opt-in) |
 | `mcpshim reload`                                      | Reload daemon configuration      |
 | `mcpshim validate [--config path]`                    | Validate config file             |
 | `mcpshim login --server s [--manual]`                 | Complete OAuth login flow        |
@@ -177,14 +172,37 @@ Not bundled — file an issue or PR if you want a `launchd` plist. A minimal pli
 | `mcpshim get-prompt --server s --name p [--arg K=V]`  | Render a prompt with arguments   |
 | `mcpshim refresh [--server s]`                        | Force-refresh tools/state now    |
 | `mcpshim manifest [--path]`                           | Print live markdown manifest (or its file path) |
+| `mcpshim history --clear [--server s] [--tool t]`     | Clear scoped call history        |
+| `mcpshim history --clear --all`                       | Clear all call history           |
 | `mcpshim script [--install] [--dir ~/.local/bin]`     | Generate/install alias wrappers  |
 
 ### Register MCP servers
 
+The config file is the source of truth. Edit it and reload:
+
 ```bash
-# Remote HTTP server with static auth
+$EDITOR ~/.config/mcpshim/config.yaml
+mcpshim reload
+```
+
+`add`, `set auth`, and `remove` do the same thing over the socket, and are
+**refused by default**. Those actions rewrite the config file, so leaving them
+enabled makes socket access equivalent to config write access -- and here a
+config write can add a `headers_helper` or a stdio `command`, both of which the
+daemon executes. Turn them on only when runtime registration is worth that:
+
+```yaml
+server:
+  allow_registry_writes: true
+```
+
+With that set:
+
+```bash
+# Remote HTTP server with static auth (single quotes keep the reference
+# unexpanded, so the token itself is never written to the config file)
 mcpshim add --name notion --alias notion --transport http --url https://example.com/mcp
-mcpshim set auth --server notion --header "Authorization=Bearer $NOTION_MCP_TOKEN"
+mcpshim set auth --server notion --header 'Authorization=Bearer ${NOTION_MCP_TOKEN}'
 
 # Remote server with a dynamic-auth helper (matches Claude Code's headersHelper).
 # The helper is run before each connect; stdout must be a JSON {key:value} of headers.
@@ -200,7 +218,13 @@ mcpshim add --name filesystem --alias fs --transport stdio \
 mcpshim reload
 ```
 
-Config values support `${VAR}` and `${VAR:-default}` expansion in URLs, headers, command, args, and env.
+Config values support `${VAR}` and `${VAR:-default}` expansion in URLs, headers,
+command, args, and env. References are kept as written in the config and
+expanded each time a connection is made, so resolved secrets are never written
+back to disk. An unset variable without a default expands to empty.
+
+Credentials are never readable back through the socket either way: `servers`
+reports `has_auth` as a boolean and never returns header values.
 
 ### Dynamic flags
 
@@ -210,7 +234,70 @@ Tool flags are converted automatically to MCP arguments:
 mcpshim call --server notion --tool search --query "projects" --limit 10 --archived false
 ```
 
-> Tip: JSON output is automatic when stdout is not a terminal. Use `--json` to force JSON parsing behavior in interactive sessions.
+> Tip: JSON output is automatic when stdout is not a terminal. Put the global
+> `--json` before the command to force JSON output in a terminal. On `call`,
+> `--json` after the tool selector parses JSON-like text fields returned by the
+> remote tool.
+
+Objects, arrays, and null can be passed as JSON values. MCPShim uses the
+discovered tool schema to keep string properties as strings:
+
+```bash
+mcpshim call --server notion --tool search \
+  --filter '{"status":"open"}' \
+  --ids '[1,2,3]' \
+  --cursor null
+```
+
+---
+
+## HTTP Services
+
+Ordinary HTTP APIs can be exposed without implementing an MCP server. A service
+owns its base URL, credentials, and policy, then publishes typed tools, a
+constrained raw request tool, or both:
+
+```yaml
+http_services:
+  - name: deployment-api
+    alias: deploy
+    base_url: https://deploy.example.com/api
+    headers:
+      Authorization: Bearer ${DEPLOY_API_TOKEN}
+    policy:
+      redirects: same-origin
+      allowed_request_content_types: [application/json]
+      max_response_bytes: 2097152
+    raw_tool:
+      name: request
+      methods: [GET, POST, PATCH]
+      paths: [/v1/deployments/**]
+    tools:
+      - name: get_deployment
+        request:
+          method: GET
+          path: /v1/deployments/{deployment_id}
+        inputs:
+          deployment_id:
+            type: string
+            required: true
+```
+
+```bash
+mcpshim call --server deploy --tool get_deployment --deployment_id dep_123
+mcpshim call --server deploy --tool request \
+  --method PATCH \
+  --path /v1/deployments/dep_123 \
+  --body '{"desired_state":"running"}'
+```
+
+Typed request bodies, queries, and headers support deeply nested structural
+templates with `$arg`, `$default`, `$omit_if_missing`, and `$format`. The raw
+tool remains limited to configured methods and wildcard paths and cannot
+override authentication or other protected headers.
+
+See the [complete HTTP service guide](docs/http-services.md) and
+[`configs/http-services.example.yaml`](configs/http-services.example.yaml).
 
 ---
 
@@ -264,16 +351,20 @@ For OAuth-capable MCP servers, you can configure URL-only registration:
 mcpshim add --name notion --alias notion --transport http --url https://mcp.notion.com/mcp
 ```
 
-When a request receives `401` and no `Authorization` header is configured, `mcpshimd` can initiate OAuth login, store tokens in SQLite (`oauth_tokens`), and retry automatically.
+When a request receives `401` and no `Authorization` header is configured,
+MCPShim checks its SQLite token store. If authorization is still required, the
+command tells you to run an explicit login instead of starting an interactive
+browser flow inside the daemon.
 
-You can also pre-authorize:
+Log in from a terminal (the browser flow runs in the CLI process, and the
+daemon is told to re-probe the server once the token is saved):
 
 ```bash
 mcpshim login --server notion
 mcpshim login --server notion --manual
 ```
 
-If your MCP server requires pre-registered OAuth clients (no dynamic registration), pass them at registration time or via `set auth`:
+If your MCP server requires pre-registered OAuth clients (no dynamic registration), pass them at registration time or via `set auth` (both need `server.allow_registry_writes: true`):
 
 ```bash
 mcpshim add --name acme --transport http --url https://mcp.acme.com/mcp \
@@ -282,7 +373,9 @@ mcpshim add --name acme --transport http --url https://mcp.acme.com/mcp \
 mcpshim set auth --server acme --client-id $ACME_CLIENT_ID --client-secret $ACME_CLIENT_SECRET
 ```
 
-To revoke a stored token (forcing re-auth on next call):
+Tokens are stored per server name *and* endpoint URL, so re-pointing a server
+at a different URL never sends it the old endpoint's token. To revoke a stored
+token (the next call then asks for `mcpshim login`):
 
 ```bash
 mcpshim logout --server notion          # token only
@@ -301,9 +394,14 @@ Every `mcpshim call` is recorded by `mcpshimd` with timestamp, server/tool, args
 mcpshim history
 mcpshim history --server notion --limit 20
 mcpshim history --server notion --tool search --limit 100
+mcpshim history --server notion --clear
+mcpshim history --clear --all
 ```
 
-History is stored locally in SQLite (`call_history` table).
+History is stored locally in SQLite (`call_history` table). The daemon retains
+the newest 1,000 calls by default; set `server.history_size` in the YAML config
+to choose another positive limit. Clearing requires at least one filter or an
+explicit `--all`.
 
 ---
 
@@ -318,6 +416,8 @@ History is stored locally in SQLite (`call_history` table).
 {"action":"inspect","server":"notion","tool":"search"}
 {"action":"call","server":"notion","tool":"search","args":{"query":"roadmap"}}
 {"action":"history","server":"notion","limit":20}
+{"action":"clear_history","server":"notion"}
+{"action":"clear_history","all":true}
 {"action":"add_server","name":"notion","alias":"notion","url":"https://mcp.notion.com/mcp","transport":"http"}
 {"action":"add_server","name":"fs","transport":"stdio","command":"npx","cmd_args":["-y","@modelcontextprotocol/server-filesystem","/tmp"],"env":{"LOG_LEVEL":"info"}}
 {"action":"add_server","name":"internal","transport":"http","url":"https://mcp.internal.example.com","headers_helper":"/opt/bin/get-mcp-auth-headers.sh"}
