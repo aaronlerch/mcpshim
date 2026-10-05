@@ -387,6 +387,15 @@ mcpshim logout --server notion --full   # token + client credentials
 
 `--manual` supports cross-device auth by printing a URL and accepting pasted callback URL/code.
 
+Every authorization request and token request (code exchange and refresh)
+carries an RFC 8707 `resource` parameter naming the MCP server, as the MCP
+authorization spec requires. Without it, an authorization server shared by
+several MCP servers cannot tell which one a token is for and may issue it with
+the wrong audience. The value is the `resource` from the server's
+protected-resource metadata (RFC 9728) when it publishes one for its own
+origin, otherwise the configured URL with a lowercase scheme and host and no
+fragment.
+
 ---
 
 ## Call History

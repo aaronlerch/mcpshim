@@ -4,6 +4,14 @@ All notable changes to MCPShim are documented here, following [Keep a Changelog]
 
 ## [Unreleased]
 
+### Fixed
+
+- Send the RFC 8707 `resource` parameter on the OAuth authorization request,
+  the code exchange, and token refresh, so an authorization server shared by
+  several MCP servers issues each token for the right audience.
+- Drop a server's stored OAuth client credentials, not just its token, when it
+  is removed or re-pointed at a new URL (including by a config reload).
+
 ## [0.0.3] - 2026-07-24
 
 ### Added

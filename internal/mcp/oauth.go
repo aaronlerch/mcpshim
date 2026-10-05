@@ -66,10 +66,12 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		redirectURI = callback.redirectURI
 	}
 
+	resource := newResourceResolver(config.ResolveServer(s).URL)
 	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
 		TokenStore:  newSQLiteTokenStore(dbStore, TokenStoreKey(s)),
 		PKCEEnabled: true,
+		HTTPClient:  oauthHTTPClient(resource),
 	}
 	// Load persisted client credentials so token refresh can include client_id.
 	// A nil store is a supported "no persistence" mode -- newSQLiteTokenStore
@@ -117,7 +119,7 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 	log.Printf("[oauth:%s] initiating full OAuth authorization flow (browser login)", s.Name)
 	// Extract handler before completeOAuthFlow shadows err.
 	oauthHandler := mcpclient.GetOAuthHandler(err)
-	if flowErr := completeOAuthFlow(ctx, err, callback, false); flowErr != nil {
+	if flowErr := completeOAuthFlow(ctx, err, callback, false, resource); flowErr != nil {
 		log.Printf("[oauth:%s] OAuth flow failed: %v", s.Name, flowErr)
 		var zero T
 		return zero, flowErr
@@ -150,10 +152,12 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 	}
 
 	adoptLegacyToken(dbStore, s)
+	resource := newResourceResolver(config.ResolveServer(s).URL)
 	oauthCfg := mcpclient.OAuthConfig{
 		RedirectURI: redirectURI,
 		TokenStore:  newSQLiteTokenStore(dbStore, TokenStoreKey(s)),
 		PKCEEnabled: true,
+		HTTPClient:  oauthHTTPClient(resource),
 	}
 	if dbStore != nil {
 		if storedClient, err := dbStore.GetOAuthClient(s.Name); err == nil && storedClient != nil {
@@ -179,7 +183,7 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 	}
 
 	oauthHandler := mcpclient.GetOAuthHandler(err)
-	if flowErr := completeOAuthFlow(ctx, err, callback, manual); flowErr != nil {
+	if flowErr := completeOAuthFlow(ctx, err, callback, manual, resource); flowErr != nil {
 		return flowErr
 	}
 
@@ -292,7 +296,7 @@ func (s *oauthCallbackServer) close() {
 	_ = s.listener.Close()
 }
 
-func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallbackServer, manual bool) error {
+func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallbackServer, manual bool, resource *resourceResolver) error {
 	oauthHandler := mcpclient.GetOAuthHandler(authErr)
 	if oauthHandler == nil {
 		return authErr
@@ -317,6 +321,11 @@ func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallba
 	authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	if err != nil {
 		return err
+	}
+	if resource != nil {
+		if authURL, err = withResourceParam(authURL, resource.resolve(ctx)); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("oauth login required; authorize here: %s\n", authURL)
