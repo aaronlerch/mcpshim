@@ -559,3 +559,47 @@ func TestRegistryWritesClearOAuthClientWhenEndpointChanges(t *testing.T) {
 		t.Fatalf("client after remove = %#v, want cleared", c)
 	}
 }
+
+func TestReloadForgetsOAuthStateOnlyForRepointedServers(t *testing.T) {
+	dir := t.TempDir()
+	dbStore, err := store.Open(filepath.Join(dir, "mcpshim.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbStore.Close()
+
+	moved := config.MCPServer{Name: "moved", URL: "https://old.example.com/mcp", Transport: "http"}
+	kept := config.MCPServer{Name: "kept", URL: "https://kept.example.com/mcp", Transport: "http"}
+	dropped := config.MCPServer{Name: "dropped", URL: "https://dropped.example.com/mcp", Transport: "http"}
+	token := &mcpclient.Token{AccessToken: "example-access", TokenType: "Bearer"}
+	for _, server := range []config.MCPServer{moved, kept, dropped} {
+		if err := dbStore.SaveToken(mcp.TokenStoreKey(server), token); err != nil {
+			t.Fatal(err)
+		}
+		if err := dbStore.SaveOAuthClient(server.Name, "client-"+server.Name, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previous := &config.Config{Servers: []config.MCPServer{moved, kept, dropped}}
+	repointed := moved
+	repointed.URL = "https://new.example.com/mcp"
+	next := &config.Config{Servers: []config.MCPServer{repointed, kept}}
+
+	forgetRepointedOAuthState(dbStore, previous, next)
+
+	if tok, _ := dbStore.GetToken(mcp.TokenStoreKey(moved)); tok != nil {
+		t.Fatal("re-pointed server kept its old-endpoint token")
+	}
+	if c, _ := dbStore.GetOAuthClient("moved"); c != nil {
+		t.Fatalf("re-pointed server kept its client: %#v", c)
+	}
+	for _, server := range []config.MCPServer{kept, dropped} {
+		if tok, _ := dbStore.GetToken(mcp.TokenStoreKey(server)); tok == nil {
+			t.Fatalf("%s lost its token", server.Name)
+		}
+		if c, _ := dbStore.GetOAuthClient(server.Name); c == nil {
+			t.Fatalf("%s lost its client", server.Name)
+		}
+	}
+}

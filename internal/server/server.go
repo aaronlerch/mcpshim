@@ -533,11 +533,37 @@ func (s *Server) applyRegistryChange(req protocol.Request) (protocol.Response, b
 				_ = previousStore.Close()
 			}
 		}
+		forgetRepointedOAuthState(s.store, s.cfg, cfg)
 		s.cfg = cfg
 		s.registry.UpdateConfig(cfg)
 		return protocol.Response{OK: true, Text: "reloaded config"}, true
 	}
 	return protocol.Response{OK: false, Error: "unknown action"}, false
+}
+
+// forgetRepointedOAuthState applies add_server's re-point rule to a reload:
+// a server whose resolved URL changed loses its stored token and OAuth client,
+// because both were issued for the previous endpoint's authorization server.
+// Servers that disappeared from the file are left alone -- commenting one out
+// and reloading should not log it out. This only sees edits made while the
+// daemon is running; an edit made while it is stopped has no previous config
+// to compare against.
+func forgetRepointedOAuthState(dbStore *store.Store, previous, next *config.Config) {
+	if dbStore == nil || previous == nil || next == nil {
+		return
+	}
+	nextURL := make(map[string]string, len(next.Servers))
+	for _, server := range next.Servers {
+		nextURL[server.Name] = config.ResolveServer(server).URL
+	}
+	for _, old := range previous.Servers {
+		url, ok := nextURL[old.Name]
+		if !ok || url == config.ResolveServer(old).URL {
+			continue
+		}
+		_ = dbStore.DeleteTokens(old.Name, mcp.TokenStoreKey(old))
+		_ = dbStore.DeleteOAuthClient(old.Name)
+	}
 }
 
 // canonicalServerName maps an alias to its server's name so history is
